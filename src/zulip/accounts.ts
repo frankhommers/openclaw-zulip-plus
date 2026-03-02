@@ -1,6 +1,6 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import { DEFAULT_ACCOUNT_ID, normalizeAccountId } from "openclaw/plugin-sdk";
-import type { ZulipAccountConfig, ZulipReactionConfig } from "../types.js";
+import type { ZulipAccountConfig, ZulipChatMode, ZulipReactionConfig } from "../types.js";
 import { normalizeEmojiName, normalizeStreamName, normalizeTopic } from "./normalize.js";
 
 export type ZulipTokenSource = "env" | "config" | "none";
@@ -58,6 +58,17 @@ export type ResolvedZulipAccount = {
   apiKeySource: ZulipTokenSource;
   streams: string[];
   alwaysReply: boolean;
+  requireMention?: boolean;
+  enableAdminActions: boolean;
+  chatmode: ZulipChatMode;
+  oncharPrefixes: string[];
+  blockStreaming: boolean;
+  blockStreamingCoalesce: { minChars?: number; idleMs?: number };
+  dmPolicy: string;
+  allowFrom: Array<string | number>;
+  groupAllowFrom: Array<string | number>;
+  groupPolicy: string;
+  responsePrefix: string;
   defaultTopic: string;
   reactions: ResolvedZulipReactions;
   textChunkLimit: number;
@@ -147,6 +158,19 @@ function resolveWorkflowMinTransitionMs(raw?: number): number {
   return Math.floor(raw);
 }
 
+function resolveZulipRequireMention(config: ZulipAccountConfig): boolean | undefined {
+  if (typeof config.requireMention === "boolean") {
+    return config.requireMention;
+  }
+  if (config.chatmode === "oncall") {
+    return true;
+  }
+  if (config.chatmode === "onmessage") {
+    return false;
+  }
+  return undefined;
+}
+
 function resolveReactions(config: ZulipReactionConfig | undefined): ResolvedZulipReactions {
   if (!config) {
     return DEFAULT_REACTIONS;
@@ -193,23 +217,39 @@ export function resolveZulipAccount(params: {
 
   const allowEnv = accountId === DEFAULT_ACCOUNT_ID;
   const envUrl = allowEnv ? process.env.ZULIP_URL?.trim() : undefined;
+  const envSite = allowEnv ? process.env.ZULIP_SITE?.trim() : undefined;
+  const envRealm = allowEnv ? process.env.ZULIP_REALM?.trim() : undefined;
   const envEmail = allowEnv ? process.env.ZULIP_EMAIL?.trim() : undefined;
   const envKey = allowEnv ? process.env.ZULIP_API_KEY?.trim() : undefined;
 
-  const configUrl = merged.baseUrl?.trim();
+  const configUrl =
+    merged.baseUrl?.trim() || merged.url?.trim() || merged.site?.trim() || merged.realm?.trim();
   const configEmail = merged.email?.trim();
   const configKey = merged.apiKey?.trim();
 
-  const baseUrl = (configUrl || envUrl)?.replace(/\/+$/, "") || undefined;
+  const baseUrl = (configUrl || envUrl || envSite || envRealm)?.replace(/\/+$/, "") || undefined;
   const email = configEmail || envEmail || undefined;
   const apiKey = configKey || envKey || undefined;
+  const requireMention = resolveZulipRequireMention(merged);
 
-  const baseUrlSource: ZulipBaseUrlSource = configUrl ? "config" : envUrl ? "env" : "none";
+  const baseUrlSource: ZulipBaseUrlSource =
+    configUrl ? "config" : envUrl || envSite || envRealm ? "env" : "none";
   const emailSource: ZulipEmailSource = configEmail ? "config" : envEmail ? "env" : "none";
   const apiKeySource: ZulipTokenSource = configKey ? "config" : envKey ? "env" : "none";
 
   const streams = normalizeStreamAllowlist(merged.streams);
   const alwaysReply = merged.alwaysReply !== false && DEFAULT_ALWAYS_REPLY;
+  const enableAdminActions = merged.enableAdminActions === true;
+  const chatmode = merged.chatmode ?? "onmessage";
+  const oncharPrefixes =
+    merged.oncharPrefixes?.map((entry) => entry.trim()).filter(Boolean) ?? [">", "!"];
+  const blockStreaming = merged.blockStreaming === true;
+  const blockStreamingCoalesce = merged.blockStreamingCoalesce ?? {};
+  const dmPolicy = merged.dmPolicy?.trim() || "disabled";
+  const allowFrom = merged.allowFrom ?? [];
+  const groupAllowFrom = merged.groupAllowFrom ?? [];
+  const groupPolicy = merged.groupPolicy?.trim() || "disabled";
+  const responsePrefix = merged.responsePrefix ?? "";
   const defaultTopic = normalizeTopic(merged.defaultTopic) || DEFAULT_TOPIC;
   const reactions = resolveReactions(merged.reactions);
   const textChunkLimit =
@@ -227,6 +267,17 @@ export function resolveZulipAccount(params: {
     apiKeySource,
     streams,
     alwaysReply,
+    requireMention,
+    enableAdminActions,
+    chatmode,
+    oncharPrefixes,
+    blockStreaming,
+    blockStreamingCoalesce,
+    dmPolicy,
+    allowFrom,
+    groupAllowFrom,
+    groupPolicy,
+    responsePrefix,
     defaultTopic,
     reactions,
     textChunkLimit,

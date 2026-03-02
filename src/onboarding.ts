@@ -186,7 +186,7 @@ export const zulipOnboardingAdapter: ChannelOnboardingAdapter = {
             zulip: {
               ...next.channels?.zulip,
               enabled: true,
-              ...(baseUrl ? { baseUrl } : {}),
+              ...(baseUrl ? { url: baseUrl } : {}),
               ...(email ? { email } : {}),
               ...(apiKey ? { apiKey } : {}),
               ...(streams ? { streams } : {}),
@@ -206,7 +206,7 @@ export const zulipOnboardingAdapter: ChannelOnboardingAdapter = {
                 [accountId]: {
                   ...next.channels?.zulip?.accounts?.[accountId],
                   enabled: next.channels?.zulip?.accounts?.[accountId]?.enabled ?? true,
-                  ...(baseUrl ? { baseUrl } : {}),
+                  ...(baseUrl ? { url: baseUrl } : {}),
                   ...(email ? { email } : {}),
                   ...(apiKey ? { apiKey } : {}),
                   ...(streams ? { streams } : {}),
