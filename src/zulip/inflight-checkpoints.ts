@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { resolveStateDir } from "../../../../src/config/paths.js";
+import { resolveStateDir } from "../shims/paths.js";
 
 export const ZULIP_INFLIGHT_CHECKPOINT_VERSION = 1;
 export const ZULIP_INFLIGHT_MAX_AGE_MS = 30 * 60 * 1000;

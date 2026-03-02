@@ -79,7 +79,7 @@ export const zulipPlugin: ChannelPlugin<ResolvedZulipAccount> = {
   onboarding: zulipOnboardingAdapter,
   pairing: {
     idLabel: "zulipUserId",
-    normalizeAllowEntry: (entry) => entry.trim(),
+    normalizeAllowEntry: (entry) => normalizeAllowEntry(entry),
     notifyApproval: async () => {
       // MVP: no DMs/pairing flow yet.
     },

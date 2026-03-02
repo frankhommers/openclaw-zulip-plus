@@ -1,14 +1,27 @@
 {
   "name": "@openclaw/zulip",
-  "version": "2026.2.4",
-  "description": "OpenClaw Zulip channel plugin",
+  "version": "1.0.0",
+  "description": "Merged Zulip channel plugin for OpenClaw - combines features from multiple implementations",
+  "main": "index.ts",
   "files": [
     "index.ts",
     "src/",
     "openclaw.plugin.json",
-    "!src/**/*.test.ts"
+    "tsconfig.json"
   ],
   "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "MIT",
+  "keywords": [
+    "openclaw",
+    "zulip",
+    "channel",
+    "plugin",
+    "chatbot"
+  ],
   "dependencies": {
     "zod": "^4.3.6"
   },
