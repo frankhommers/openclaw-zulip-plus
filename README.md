@@ -56,23 +56,27 @@ This plugin is a merge of the best features from multiple independent Zulip impl
 
 ## Installation
 
+### From GitHub (clone + local install)
+
+```bash
+git clone https://github.com/frankhommers/openclaw-zulip-plus.git
+openclaw plugins install ./openclaw-zulip-plus
+```
+
 ### From npm (once published)
 
 ```bash
 openclaw plugins install openclaw-zulip-plus
 ```
 
-### From GitHub (direct)
-
-```bash
-openclaw plugins install github:frankhommers/openclaw-zulip-plus
-```
-
-### Local (development)
+### From a local directory
 
 ```bash
 openclaw plugins install /path/to/openclaw-zulip-plus
 ```
+
+> **Note:** `openclaw plugins install` does not support `github:` specs directly.
+> Clone the repository first, then install from the local path.
 
 ## Configuration
 
