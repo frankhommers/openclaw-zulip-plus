@@ -98,7 +98,7 @@ export class ToolProgressAccumulator {
    * up the change.
    */
   setModel(model: string): void {
-    this.params = { ...this.params, model };
+    this.params.model = model;
   }
 
   /**

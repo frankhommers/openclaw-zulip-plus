@@ -9,14 +9,14 @@ export function resolveZulipGroupRequireMention(params: ChannelGroupContext): bo
   if (typeof account.requireMention === "boolean") {
     return account.requireMention;
   }
+  if (typeof account.config.alwaysReply === "boolean") {
+    return !account.config.alwaysReply;
+  }
   if (account.chatmode === "oncall") {
     return true;
   }
   if (account.chatmode === "onmessage") {
     return false;
-  }
-  if (typeof account.alwaysReply === "boolean") {
-    return !account.alwaysReply;
   }
   return false;
 }

@@ -146,7 +146,7 @@ export const zulipPlugin: ChannelPlugin<ResolvedZulipAccount> = {
     resolveAllowFrom: ({ cfg, accountId }) =>
       (resolveZulipAccount({ cfg, accountId }).config.allowFrom ?? []).map((entry) => String(entry)),
     formatAllowFrom: ({ allowFrom }) =>
-      allowFrom.map((entry) => formatAllowEntry(String(entry))).filter(Boolean),
+      allowFrom.map((entry: unknown) => formatAllowEntry(String(entry))).filter(Boolean),
   },
   security: {
     resolveDmPolicy: ({ cfg, accountId, account }) => {
@@ -162,7 +162,7 @@ export const zulipPlugin: ChannelPlugin<ResolvedZulipAccount> = {
         policyPath: `${basePath}dmPolicy`,
         allowFromPath: basePath,
         approveHint: formatPairingApproveHint("zulip"),
-        normalizeEntry: (raw) => normalizeAllowEntry(raw),
+        normalizeEntry: (raw: string) => normalizeAllowEntry(raw),
       };
     },
     collectWarnings: ({ account, cfg }) => {

@@ -326,7 +326,6 @@ describe("monitorZulipProvider cleanup race", () => {
         exit: vi.fn(),
       },
     });
-
     await firstSendDone;
 
     monitor.stop();

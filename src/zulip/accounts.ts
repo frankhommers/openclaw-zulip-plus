@@ -146,6 +146,24 @@ function mergeZulipAccountConfig(cfg: OpenClawConfig, accountId: string): ZulipA
   return { ...base, ...account };
 }
 
+function resolveConfiguredBaseUrl(cfg: OpenClawConfig, accountId: string): string | undefined {
+  const account = resolveAccountConfig(cfg, accountId);
+  const accountUrl =
+    account?.baseUrl?.trim() || account?.url?.trim() || account?.site?.trim() || account?.realm?.trim();
+  if (accountUrl) {
+    return accountUrl;
+  }
+
+  const section = cfg.channels?.zulip as ZulipAccountConfig | undefined;
+  return (
+    section?.baseUrl?.trim() ||
+    section?.url?.trim() ||
+    section?.site?.trim() ||
+    section?.realm?.trim() ||
+    undefined
+  );
+}
+
 function normalizeStreamAllowlist(streams?: string[]): string[] {
   const normalized = (streams ?? []).map((entry) => normalizeStreamName(entry)).filter(Boolean);
   return Array.from(new Set(normalized));
@@ -222,8 +240,7 @@ export function resolveZulipAccount(params: {
   const envEmail = allowEnv ? process.env.ZULIP_EMAIL?.trim() : undefined;
   const envKey = allowEnv ? process.env.ZULIP_API_KEY?.trim() : undefined;
 
-  const configUrl =
-    merged.baseUrl?.trim() || merged.url?.trim() || merged.site?.trim() || merged.realm?.trim();
+  const configUrl = resolveConfiguredBaseUrl(params.cfg, accountId);
   const configEmail = merged.email?.trim();
   const configKey = merged.apiKey?.trim();
 
@@ -248,7 +265,7 @@ export function resolveZulipAccount(params: {
   const dmPolicy = merged.dmPolicy?.trim() || "disabled";
   const allowFrom = merged.allowFrom ?? [];
   const groupAllowFrom = merged.groupAllowFrom ?? [];
-  const groupPolicy = merged.groupPolicy?.trim() || "disabled";
+  const groupPolicy = merged.groupPolicy?.trim() || "open";
   const responsePrefix = merged.responsePrefix ?? "";
   const defaultTopic = normalizeTopic(merged.defaultTopic) || DEFAULT_TOPIC;
   const reactions = resolveReactions(merged.reactions);

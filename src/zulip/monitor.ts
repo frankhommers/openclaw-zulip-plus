@@ -103,7 +103,17 @@ type ZulipEvent = {
   orig_subject?: string;
   topic?: string;
   orig_topic?: string;
-} & Partial<ZulipReactionEvent>;
+  op?: "add" | "remove";
+  message_id?: number;
+  emoji_name?: string;
+  emoji_code?: string;
+  user_id?: number;
+  user?: {
+    email?: string;
+    full_name?: string;
+    user_id?: number;
+  };
+};
 
 type ZulipEventsResponse = {
   result: "success" | "error";
@@ -489,11 +499,31 @@ function resolveMarkdownTableMode(params: {
   accountId: string;
 }) {
   const core = getZulipRuntime();
-  return core.channel.text.resolveMarkdownTableMode({
+  const resolveMode = (
+    core.channel.text as {
+      resolveMarkdownTableMode?: (args: {
+        cfg: OpenClawConfig;
+        channel: string;
+        accountId: string;
+      }) => unknown;
+    }
+  ).resolveMarkdownTableMode;
+  if (typeof resolveMode !== "function") {
+    return "off";
+  }
+  return resolveMode({
     cfg: params.cfg,
     channel: "zulip",
     accountId: params.accountId,
   });
+}
+
+function sanitizeBackticksCompat(text: string): string {
+  try {
+    return sanitizeBackticks(text);
+  } catch {
+    return text;
+  }
 }
 
 async function fetchZulipMe(auth: ZulipAuth, abortSignal?: AbortSignal): Promise<ZulipMeResponse> {
@@ -963,8 +993,16 @@ async function deliverReply(params: {
     cfg: params.cfg,
     accountId: params.account.accountId,
   });
-  const convertedText = core.channel.text.convertMarkdownTables(topicDirective.text, tableMode);
-  const text = sanitizeBackticks(convertedText);
+  const convertMarkdownTables = (
+    core.channel.text as {
+      convertMarkdownTables?: (text: string, mode: unknown) => string;
+    }
+  ).convertMarkdownTables;
+  const convertedText =
+    typeof convertMarkdownTables === "function"
+      ? convertMarkdownTables(topicDirective.text, tableMode)
+      : topicDirective.text;
+  const text = sanitizeBackticksCompat(convertedText);
   const mediaUrls = (params.payload.mediaUrls ?? []).filter(Boolean);
   const mediaUrl = params.payload.mediaUrl?.trim();
   if (mediaUrl) {
@@ -1058,7 +1096,7 @@ async function deliverReply(params: {
 
 export async function monitorZulipProvider(
   opts: MonitorZulipOptions,
-): Promise<{ stop: () => void }> {
+): Promise<{ stop: () => void; done: Promise<void> }> {
   const core = getZulipRuntime();
   const cfg = opts.config ?? core.config.loadConfig();
   const account = resolveZulipAccount({
@@ -1165,7 +1203,7 @@ export async function monitorZulipProvider(
         return;
       }
       if (!isDM) {
-        const groupPolicy = (account.groupPolicy || "disabled").trim().toLowerCase();
+        const groupPolicy = (account.groupPolicy || "open").trim().toLowerCase();
         if (groupPolicy === "disabled") {
           return;
         }
@@ -1277,11 +1315,12 @@ export async function monitorZulipProvider(
 
       // Send typing indicator while the agent processes, and refresh every 10s.
       if (typeof msg.stream_id === "number") {
-        sendTypingIndicator({ auth, streamId: msg.stream_id, topic, abortSignal }).catch(
+        const streamId = msg.stream_id;
+        sendTypingIndicator({ auth, streamId, topic, abortSignal }).catch(
           () => undefined,
         );
         typingRefreshInterval = setInterval(() => {
-          sendTypingIndicator({ auth, streamId: msg.stream_id, topic, abortSignal }).catch(
+          sendTypingIndicator({ auth, streamId, topic, abortSignal }).catch(
             () => undefined,
           );
         }, 10_000);
@@ -1448,7 +1487,7 @@ export async function monitorZulipProvider(
           accountId: account.accountId,
         });
       const onModelSelected = (ctx: { model: string; provider?: string; thinkLevel?: string }) => {
-        originalOnModelSelected(ctx);
+        originalOnModelSelected?.(ctx);
         if (ctx.model && toolProgress) {
           toolProgress.setModel(ctx.model);
         }
@@ -1515,7 +1554,7 @@ export async function monitorZulipProvider(
               at: Date.now(),
             });
           },
-          onError: (err) => {
+          onError: (err: unknown) => {
             runtime.error?.(`zulip reply failed: ${String(err)}`);
           },
         });
@@ -1870,7 +1909,7 @@ export async function monitorZulipProvider(
             disableBlockStreaming: !account.blockStreaming,
           },
         })
-        .catch((err) => {
+        .catch((err: unknown) => {
           logger.error?.(`[zulip] ${params.errorLabel} dispatch failed: ${String(err)}`);
         });
     };
