@@ -66,7 +66,7 @@ openclaw plugins install ./openclaw-zulip-plus
 ### From npm (once published)
 
 ```bash
-openclaw plugins install openclaw-zulip-plus
+openclaw plugins install openclaw-zulip
 ```
 
 ### From a local directory
