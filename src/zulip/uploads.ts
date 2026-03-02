@@ -96,14 +96,14 @@ export function extractZulipUploadUrls(content: string, baseUrl: string): string
 function buildZulipAuthFetch(params: {
   auth: ZulipAuth;
   includeAuthForOrigin?: string;
-}): (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> {
+}): (input: string | URL, init?: RequestInit) => Promise<Response> {
   const token = Buffer.from(`${params.auth.email}:${params.auth.apiKey}`, "utf8").toString(
     "base64",
   );
   const includeAuthForOrigin = params.includeAuthForOrigin;
   return async (input, init) => {
     const url =
-      typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      typeof input === "string" ? input : input.toString();
     const headers = new Headers(init?.headers);
     if (includeAuthForOrigin) {
       try {
@@ -283,7 +283,7 @@ export async function uploadZulipFile(params: {
   );
 
   const form = new FormData();
-  const blob = new Blob([params.buffer as BlobPart], {
+  const blob = new Blob([params.buffer as Uint8Array], {
     type: params.contentType?.trim() || "application/octet-stream",
   });
   form.append("file", blob, params.filename);

@@ -22,11 +22,14 @@
     "plugin",
     "chatbot"
   ],
+  "dependencies": {
+    "zod": "^4.3.6"
+  },
   "devDependencies": {
     "@types/node": "^25.3.3",
+    "openclaw": "*",
     "typescript": "^5.9.3",
-    "vitest": "^4.0.18",
-    "zod": "^4.3.6"
+    "vitest": "^4.0.18"
   },
   "openclaw": {
     "extensions": [
