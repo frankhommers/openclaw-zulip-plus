@@ -1,3 +1,5 @@
+export type ZulipChatMode = "oncall" | "onmessage" | "onchar";
+
 export type ZulipReactionWorkflowStageConfig = {
   queued?: string;
   processing?: string;
@@ -37,6 +39,7 @@ export type ZulipReactionConfig = {
   onStart?: string;
   onSuccess?: string;
   onFailure?: string;
+  onError?: string;
   /**
    * Whether to remove the `onStart` reaction after responding (default: true).
    * Set to false to leave the `onStart` reaction (e.g. ":eyes:") on the message.
@@ -56,15 +59,27 @@ export type ZulipReactionConfig = {
 
 export type ZulipAccountConfig = {
   name?: string;
+  capabilities?: string[];
   enabled?: boolean;
   configWrites?: boolean;
+  enableAdminActions?: boolean;
 
   baseUrl?: string;
+  url?: string;
+  site?: string;
+  realm?: string;
   email?: string;
   apiKey?: string;
 
   /** Stream allowlist to monitor (names; without leading "#"). */
   streams?: string[];
+
+  chatmode?: ZulipChatMode;
+  oncharPrefixes?: string[];
+  dmPolicy?: string;
+  allowFrom?: Array<string | number>;
+  groupAllowFrom?: Array<string | number>;
+  groupPolicy?: string;
 
   /**
    * Reply to every message in monitored streams/topics (default: true).
@@ -84,9 +99,14 @@ export type ZulipAccountConfig = {
 
   /** Maximum chars before chunking. */
   textChunkLimit?: number;
+  chunkMode?: "length" | "newline";
 
   /** Maximum inbound/outbound media size in MB (default: 5MB). */
   mediaMaxMb?: number;
+
+  blockStreaming?: boolean;
+  blockStreamingCoalesce?: { minChars?: number; idleMs?: number };
+  responsePrefix?: string;
 
   /**
    * Require @mention to respond in streams (default: false).
@@ -95,3 +115,7 @@ export type ZulipAccountConfig = {
    */
   requireMention?: boolean;
 };
+
+export type ZulipConfig = {
+  accounts?: Record<string, ZulipAccountConfig>;
+} & ZulipAccountConfig;
