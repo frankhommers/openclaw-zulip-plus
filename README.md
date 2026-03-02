@@ -56,14 +56,22 @@ This plugin is a merge of the best features from multiple independent Zulip impl
 
 ## Installation
 
+### From npm (once published)
+
 ```bash
 openclaw plugins install openclaw-zulip-plus
 ```
 
-Or manually:
+### From GitHub (direct)
 
 ```bash
-npm install openclaw-zulip-plus
+openclaw plugins install github:frankhommers/openclaw-zulip-plus
+```
+
+### Local (development)
+
+```bash
+openclaw plugins install /path/to/openclaw-zulip-plus
 ```
 
 ## Configuration
@@ -89,11 +97,11 @@ zulip:
 ## Development
 
 ```bash
-git clone https://github.com/<your-username>/openclaw-zulip-plus.git
+git clone https://github.com/frankhommers/openclaw-zulip-plus.git
 cd openclaw-zulip-plus
 npm install
 npm run typecheck   # tsc --noEmit
-npm test            # vitest run
+npm test            # vitest run (110 tests)
 ```
 
 ## Credits
