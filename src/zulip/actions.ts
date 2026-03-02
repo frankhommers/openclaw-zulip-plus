@@ -405,7 +405,7 @@ export const zulipMessageActions: ChannelMessageActionAdapter = {
     }
     const actions = new Set<ChannelMessageActionName>([
       "send",
-      "sendWithReactions",
+      "poll",
       "read",
       "channel-list",
       "channel-create",
@@ -468,7 +468,7 @@ export const zulipMessageActions: ChannelMessageActionAdapter = {
       return jsonResult({ success: true, messageId: result.id });
     }
 
-    if (action === "sendWithReactions") {
+    if (action === "poll") {
       const targetRaw =
         readStringParam(params, "target") ??
         readStringParam(params, "to", { required: true });
@@ -508,7 +508,7 @@ export const zulipMessageActions: ChannelMessageActionAdapter = {
       const topic =
         readStringParam(params, "topic") ?? target.topic ?? account.defaultTopic;
       if (!topic?.trim()) {
-        throw new Error("Topic is required for sendWithReactions.");
+        throw new Error("Topic is required for poll.");
       }
 
       const result = await sendWithReactionButtons({
@@ -526,7 +526,7 @@ export const zulipMessageActions: ChannelMessageActionAdapter = {
 
       return jsonResult({
         ok: true,
-        action: "sendWithReactions",
+        action: "poll",
         messageId: String(result.messageId),
         options: options.map((opt, idx) => ({ index: idx, label: opt.label, value: opt.value })),
       });

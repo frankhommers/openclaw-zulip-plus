@@ -940,9 +940,9 @@ function createReactionTransitionController(params: {
 
 function withWorkflowReactionStages<
   T extends {
-    sendToolResult: (...args: unknown[]) => unknown;
-    sendBlockReply: (...args: unknown[]) => unknown;
-    sendFinalReply: (...args: unknown[]) => unknown;
+    sendToolResult: (payload: ReplyPayload) => boolean;
+    sendBlockReply: (payload: ReplyPayload) => boolean;
+    sendFinalReply: (payload: ReplyPayload) => boolean;
   },
 >(
   dispatcher: T,
@@ -952,23 +952,23 @@ function withWorkflowReactionStages<
 ): T {
   return {
     ...dispatcher,
-    sendToolResult: (...args: unknown[]) => {
+    sendToolResult: (payload: ReplyPayload) => {
       if (reactions.workflow.stages.toolRunning) {
         void controller.transition("toolRunning", { abortSignal });
       }
-      return dispatcher.sendToolResult(...args);
+      return dispatcher.sendToolResult(payload);
     },
-    sendBlockReply: (...args: unknown[]) => {
+    sendBlockReply: (payload: ReplyPayload) => {
       if (reactions.workflow.stages.processing) {
         void controller.transition("processing", { abortSignal });
       }
-      return dispatcher.sendBlockReply(...args);
+      return dispatcher.sendBlockReply(payload);
     },
-    sendFinalReply: (...args: unknown[]) => {
+    sendFinalReply: (payload: ReplyPayload) => {
       if (reactions.workflow.stages.processing) {
         void controller.transition("processing", { abortSignal });
       }
-      return dispatcher.sendFinalReply(...args);
+      return dispatcher.sendFinalReply(payload);
     },
   };
 }
@@ -1040,7 +1040,7 @@ async function deliverReply(params: {
 
   const trimmedText = text.trim();
   if (!trimmedText && mediaUrls.length === 0) {
-    logger.debug(`[zulip] deliverReply: empty response (no text, no media) — skipping`);
+    logger.debug?.(`[zulip] deliverReply: empty response (no text, no media) — skipping`);
     return;
   }
   if (mediaUrls.length === 0) {
@@ -1104,9 +1104,9 @@ export async function monitorZulipProvider(
     accountId: opts.accountId,
   });
   const runtime: RuntimeEnv = opts.runtime ?? {
-    log: (message: string) => core.logging.getChildLogger().info(message),
-    error: (message: string) => core.logging.getChildLogger().error(message),
-    exit: () => {
+    log: (...args: unknown[]) => core.logging.getChildLogger().info(args.map(String).join(" ")),
+    error: (...args: unknown[]) => core.logging.getChildLogger().error(args.map(String).join(" ")),
+    exit: (code: number) => {
       throw new Error("Runtime exit not available");
     },
   };
@@ -1486,7 +1486,8 @@ export async function monitorZulipProvider(
           channel: "zulip",
           accountId: account.accountId,
         });
-      const onModelSelected = (ctx: { model: string; provider?: string; thinkLevel?: string }) => {
+      type ModelSelectedContext = Parameters<NonNullable<typeof originalOnModelSelected>>[0];
+      const onModelSelected = (ctx: ModelSelectedContext) => {
         originalOnModelSelected?.(ctx);
         if (ctx.model && toolProgress) {
           toolProgress.setModel(ctx.model);
@@ -1879,30 +1880,35 @@ export async function monitorZulipProvider(
           ctx: ctxPayload,
           cfg,
           dispatcher: {
-            sendToolResult: () => Promise.resolve(),
-            sendBlockReply: async (payload: ReplyPayload) => {
-              if (payload.text) {
-                await sendZulipStreamMessage({
-                  auth,
-                  stream: params.stream,
-                  topic: params.topic,
-                  content: payload.text,
-                  abortSignal,
-                });
+            sendToolResult: () => true,
+            sendBlockReply: (payload: ReplyPayload) => {
+              if (!payload.text) {
+                return false;
               }
+              void sendZulipStreamMessage({
+                auth,
+                stream: params.stream,
+                topic: params.topic,
+                content: payload.text,
+                abortSignal,
+              });
+              return true;
             },
-            sendFinalReply: async (payload: ReplyPayload) => {
-              if (payload.text) {
-                await sendZulipStreamMessage({
-                  auth,
-                  stream: params.stream,
-                  topic: params.topic,
-                  content: payload.text,
-                  abortSignal,
-                });
+            sendFinalReply: (payload: ReplyPayload) => {
+              if (!payload.text) {
+                return false;
               }
+              void sendZulipStreamMessage({
+                auth,
+                stream: params.stream,
+                topic: params.topic,
+                content: payload.text,
+                abortSignal,
+              });
+              return true;
             },
             markComplete: () => {},
+            getQueuedCounts: () => ({ tool: 0, block: 0, final: 0 }),
             waitForIdle: () => Promise.resolve(),
           },
           replyOptions: {

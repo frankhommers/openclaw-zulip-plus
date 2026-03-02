@@ -70,8 +70,6 @@ export const zulipPlugin: ChannelPlugin<ResolvedZulipAccount> = {
   },
   defaults: {
     queue: {
-      // Prefer one reply per message by default (avoid "collect" coalescing).
-      mode: "followup",
       // Keep followups snappy; users can override via messages.queue.* config.
       debounceMs: 250,
     },
@@ -403,7 +401,8 @@ export const zulipPlugin: ChannelPlugin<ResolvedZulipAccount> = {
       const inputAny = input as Record<string, string | boolean | undefined>;
       const apiKey = (inputAny.apiKey as string | undefined) ?? input.botToken ?? input.token;
       const email = inputAny.email as string | undefined;
-      const baseUrl = (input.httpUrl ?? inputAny.url)?.trim();
+      const rawBaseUrl = input.httpUrl ?? inputAny.url;
+      const baseUrl = typeof rawBaseUrl === "string" ? rawBaseUrl.trim() : undefined;
       const namedConfig = applyAccountNameToChannelSection({
         cfg,
         channelKey: "zulip",

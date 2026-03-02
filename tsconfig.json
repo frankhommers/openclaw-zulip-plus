@@ -3,9 +3,9 @@
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
+    "allowImportingTsExtensions": true,
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
     "outDir": "./dist",
-    "rootDir": ".",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
@@ -15,9 +15,9 @@
     "sourceMap": true,
     "baseUrl": ".",
     "paths": {
-      "openclaw/plugin-sdk": ["./stubs/openclaw-plugin-sdk/index.ts"]
+      "openclaw/plugin-sdk": ["../repo-openclaw/src/plugin-sdk/index.ts"]
     }
   },
-  "include": ["index.ts", "src/**/*"],
+  "include": ["index.ts", "src/**/*", "../repo-openclaw/src/types/**/*.d.ts"],
   "exclude": ["node_modules", "dist", "**/*.test.ts"]
 }
