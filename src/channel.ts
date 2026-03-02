@@ -1,4 +1,5 @@
 import {
+  applyAccountNameToChannelSection,
   buildChannelConfigSchema,
   DEFAULT_ACCOUNT_ID,
   deleteAccountFromConfigSection,
@@ -10,8 +11,10 @@ import {
 } from "openclaw/plugin-sdk";
 import { ZulipConfigSchema } from "./config-schema.js";
 import { resolveZulipGroupRequireMention } from "./group-mentions.js";
+import { looksLikeZulipTargetId, normalizeZulipMessagingTarget } from "./normalize.js";
 import { zulipOnboardingAdapter } from "./onboarding.js";
 import { getZulipRuntime } from "./runtime.js";
+import type { ZulipAccountConfig, ZulipConfig } from "./types.js";
 import {
   listZulipAccountIds,
   resolveDefaultZulipAccountId,
@@ -20,7 +23,7 @@ import {
 } from "./zulip/accounts.js";
 import { zulipMessageActions } from "./zulip/actions.js";
 import { monitorZulipProvider } from "./zulip/monitor.js";
-import { normalizeStreamName, normalizeTopic } from "./zulip/normalize.js";
+import { normalizeStreamName, normalizeTopic, normalizeZulipBaseUrl } from "./zulip/normalize.js";
 import { sendZulipStreamMessage } from "./zulip/send.js";
 import { parseZulipTarget } from "./zulip/targets.js";
 import { resolveOutboundMedia, uploadZulipFile } from "./zulip/uploads.js";
@@ -39,6 +42,26 @@ const meta = {
 } as const;
 
 const activeProviders = new Map<string, { stop: () => void }>();
+
+function normalizeAllowEntry(entry: string): string {
+  return entry
+    .trim()
+    .replace(/^(zulip|user):/i, "")
+    .replace(/^@/, "")
+    .toLowerCase();
+}
+
+function formatAllowEntry(entry: string): string {
+  const trimmed = entry.trim();
+  if (!trimmed) {
+    return "";
+  }
+  if (trimmed.startsWith("@")) {
+    const username = trimmed.slice(1).trim();
+    return username ? `@${username.toLowerCase()}` : "";
+  }
+  return trimmed.replace(/^(zulip|user):/i, "").toLowerCase();
+}
 
 export const zulipPlugin: ChannelPlugin<ResolvedZulipAccount> = {
   id: "zulip",
@@ -62,11 +85,14 @@ export const zulipPlugin: ChannelPlugin<ResolvedZulipAccount> = {
     },
   },
   capabilities: {
-    chatTypes: ["channel", "thread"],
+    chatTypes: ["direct", "channel", "group", "thread"],
     threads: true,
     reactions: true,
     media: true,
     nativeCommands: true,
+  },
+  streaming: {
+    blockStreamingCoalesceDefaults: { minChars: 1500, idleMs: 1000 },
   },
   groups: {
     resolveRequireMention: resolveZulipGroupRequireMention,
@@ -100,7 +126,7 @@ export const zulipPlugin: ChannelPlugin<ResolvedZulipAccount> = {
         cfg,
         sectionKey: "zulip",
         accountId,
-        clearBaseFields: ["baseUrl", "email", "apiKey", "streams", "defaultTopic"],
+        clearBaseFields: ["url", "baseUrl", "email", "apiKey", "streams", "defaultTopic"],
       }),
     isConfigured: (account) => Boolean(account.baseUrl && account.email && account.apiKey),
     describeAccount: (account) => ({
@@ -108,41 +134,53 @@ export const zulipPlugin: ChannelPlugin<ResolvedZulipAccount> = {
       name: account.name,
       enabled: account.enabled,
       configured: Boolean(account.baseUrl && account.email && account.apiKey),
+      tokenSource: account.apiKeySource,
       baseUrlSource: account.baseUrlSource,
       emailSource: account.emailSource,
       apiKeySource: account.apiKeySource,
+      baseUrl: account.baseUrl,
       streams: account.streams,
       alwaysReply: account.alwaysReply,
       defaultTopic: account.defaultTopic,
     }),
-    resolveAllowFrom: () => [],
+    resolveAllowFrom: ({ cfg, accountId }) =>
+      (resolveZulipAccount({ cfg, accountId }).config.allowFrom ?? []).map((entry) => String(entry)),
     formatAllowFrom: ({ allowFrom }) =>
-      allowFrom.map((entry) => String(entry).trim()).filter(Boolean),
+      allowFrom.map((entry) => formatAllowEntry(String(entry))).filter(Boolean),
   },
   security: {
-    resolveDmPolicy: ({ account: _account }) => ({
-      policy: "disabled",
-      allowFrom: [],
-      policyPath: "channels.zulip.dmPolicy",
-      allowFromPath: "channels.zulip.allowFrom",
-      approveHint: formatPairingApproveHint("zulip"),
-      normalizeEntry: (raw) => raw.trim(),
-    }),
+    resolveDmPolicy: ({ cfg, accountId, account }) => {
+      const resolvedAccountId = accountId ?? account.accountId ?? DEFAULT_ACCOUNT_ID;
+      const zulipSection = cfg.channels?.zulip as ZulipConfig | undefined;
+      const useAccountPath = Boolean(zulipSection?.accounts?.[resolvedAccountId]);
+      const basePath = useAccountPath
+        ? `channels.zulip.accounts.${resolvedAccountId}.`
+        : "channels.zulip.";
+      return {
+        policy: account.config.dmPolicy ?? "pairing",
+        allowFrom: account.config.allowFrom ?? [],
+        policyPath: `${basePath}dmPolicy`,
+        allowFromPath: basePath,
+        approveHint: formatPairingApproveHint("zulip"),
+        normalizeEntry: (raw) => normalizeAllowEntry(raw),
+      };
+    },
+    collectWarnings: ({ account, cfg }) => {
+      const defaultGroupPolicy = cfg.channels?.defaults?.groupPolicy;
+      const groupPolicy = account.config.groupPolicy ?? defaultGroupPolicy ?? "allowlist";
+      if (groupPolicy !== "open") {
+        return [];
+      }
+      return [
+        '- Zulip streams: groupPolicy="open" allows any member to trigger (mention-gated). Set channels.zulip.groupPolicy="allowlist" + channels.zulip.groupAllowFrom to restrict senders.',
+      ];
+    },
   },
   messaging: {
-    normalizeTarget: (raw) => {
-      const trimmed = raw.trim();
-      if (!trimmed) {
-        return trimmed;
-      }
-      if (/^zulip:/i.test(trimmed)) {
-        return trimmed.replace(/^zulip:/i, "");
-      }
-      return trimmed;
-    },
+    normalizeTarget: normalizeZulipMessagingTarget,
     targetResolver: {
-      looksLikeId: (raw) => /^zulip:stream:|^stream:/i.test(raw.trim()),
-      hint: "stream:<streamName>#<topic?>",
+      looksLikeId: looksLikeZulipTargetId,
+      hint: "<stream:NAME[:topic]|user:email|#stream[:topic]|@email>",
     },
     formatTargetDisplay: ({ target }) => target,
   },
@@ -337,18 +375,83 @@ export const zulipPlugin: ChannelPlugin<ResolvedZulipAccount> = {
     },
   },
   setup: {
-    applyAccountConfig: ({ cfg, accountId, input: _input }) => {
+    resolveAccountId: ({ accountId }) => normalizeAccountId(accountId),
+    applyAccountName: ({ cfg, accountId, name }) =>
+      applyAccountNameToChannelSection({
+        cfg,
+        channelKey: "zulip",
+        accountId,
+        name,
+      }),
+    validateInput: ({ accountId, input }) => {
+      const inputAny = input as Record<string, string | boolean | undefined>;
+      if (input.useEnv && accountId !== DEFAULT_ACCOUNT_ID) {
+        return "Zulip env vars can only be used for the default account.";
+      }
+      const apiKey = (inputAny.apiKey as string | undefined) ?? input.botToken ?? input.token;
+      const email = inputAny.email as string | undefined;
+      const baseUrl = input.httpUrl;
+      if (!input.useEnv && (!apiKey || !email || !baseUrl)) {
+        return "Zulip requires --api-key, --email, and --http-url (or --use-env).";
+      }
+      if (baseUrl && !normalizeZulipBaseUrl(baseUrl)) {
+        return "Zulip --http-url must include a valid base URL.";
+      }
+      return null;
+    },
+    applyAccountConfig: ({ cfg, accountId, input }) => {
+      const inputAny = input as Record<string, string | boolean | undefined>;
+      const apiKey = (inputAny.apiKey as string | undefined) ?? input.botToken ?? input.token;
+      const email = inputAny.email as string | undefined;
+      const baseUrl = (input.httpUrl ?? inputAny.url)?.trim();
+      const namedConfig = applyAccountNameToChannelSection({
+        cfg,
+        channelKey: "zulip",
+        accountId,
+        name: input.name,
+      });
       const next =
         accountId !== DEFAULT_ACCOUNT_ID
-          ? migrateBaseNameToDefaultAccount({ cfg, channelKey: "zulip" })
-          : cfg;
+          ? migrateBaseNameToDefaultAccount({ cfg: namedConfig, channelKey: "zulip" })
+          : namedConfig;
+      const zulipSection = (next.channels?.zulip ?? {}) as ZulipConfig;
+      const zulipAccounts = (zulipSection.accounts ?? {}) as Record<string, ZulipAccountConfig>;
+      if (accountId === DEFAULT_ACCOUNT_ID) {
+        return {
+          ...next,
+          channels: {
+            ...next.channels,
+            zulip: {
+              ...zulipSection,
+              enabled: true,
+              ...(input.useEnv
+                ? {}
+                : {
+                    ...(apiKey ? { apiKey } : {}),
+                    ...(email ? { email } : {}),
+                    ...(baseUrl ? { url: baseUrl } : {}),
+                  }),
+            },
+          },
+        };
+      }
       return {
         ...next,
         channels: {
           ...next.channels,
           zulip: {
-            ...next.channels?.zulip,
+            ...zulipSection,
             enabled: true,
+            accounts: {
+              ...zulipAccounts,
+              [accountId]: {
+                ...zulipAccounts[accountId],
+                enabled: true,
+                ...(apiKey ? { apiKey } : {}),
+                ...(email ? { email } : {}),
+                ...(baseUrl ? { url: baseUrl } : {}),
+              },
+            },
           },
         },
       };

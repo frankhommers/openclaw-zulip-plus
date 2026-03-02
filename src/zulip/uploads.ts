@@ -1,6 +1,10 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { resolveChannelMediaMaxBytes, type OpenClawConfig } from "openclaw/plugin-sdk";
+import {
+  fetchWithSsrFGuard,
+  resolveChannelMediaMaxBytes,
+  type OpenClawConfig,
+} from "openclaw/plugin-sdk";
 import { getZulipRuntime } from "../runtime.js";
 import type { ZulipApiSuccess, ZulipAuth } from "./client.js";
 import { normalizeZulipBaseUrl } from "./normalize.js";
@@ -128,6 +132,28 @@ function resolveFilenameFromUrl(url: string): string | undefined {
   }
 }
 
+function resolveFilename(url: string, contentDisposition?: string | null): string {
+  if (contentDisposition) {
+    const encodedMatch = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i);
+    if (encodedMatch?.[1]) {
+      return decodeURIComponent(encodedMatch[1]);
+    }
+    const match = contentDisposition.match(/filename="?([^";]+)"?/i);
+    if (match?.[1]) {
+      return match[1];
+    }
+  }
+  return resolveFilenameFromUrl(url) ?? "upload.bin";
+}
+
+export function normalizeZulipEmojiName(raw?: string | null): string {
+  const trimmed = raw?.trim() ?? "";
+  if (!trimmed) {
+    return "";
+  }
+  return trimmed.replace(/^:+|:+$/g, "");
+}
+
 export type ZulipInboundUpload = {
   url: string;
   path: string;
@@ -191,6 +217,48 @@ export async function downloadZulipUploads(params: {
     }
   }
   return out;
+}
+
+export async function downloadZulipUpload(
+  url: string,
+  baseUrl: string,
+  authHeader: string,
+  maxBytes: number,
+): Promise<{ buffer: Buffer; contentType: string; filename: string }> {
+  const baseOrigin = new URL(baseUrl).origin;
+  const target = new URL(url);
+  if (target.origin !== baseOrigin || !target.pathname.includes("/user_uploads/")) {
+    throw new Error("Refusing to download Zulip upload from non-Zulip origin");
+  }
+  const { response: res, release } = await fetchWithSsrFGuard({
+    url,
+    init: {
+      headers: {
+        Authorization: `Basic ${authHeader}`,
+      },
+    },
+  });
+  try {
+    if (!res.ok) {
+      throw new Error(`Zulip upload download failed: ${res.status} ${res.statusText}`);
+    }
+    const contentLength = res.headers.get("content-length");
+    if (contentLength) {
+      const length = Number(contentLength);
+      if (!Number.isNaN(length) && length > maxBytes) {
+        throw new Error(`Zulip upload exceeds max size (${length} > ${maxBytes})`);
+      }
+    }
+    const buffer = Buffer.from(await res.arrayBuffer());
+    if (buffer.length > maxBytes) {
+      throw new Error(`Zulip upload exceeds max size (${buffer.length} > ${maxBytes})`);
+    }
+    const contentType = res.headers.get("content-type") ?? "application/octet-stream";
+    const filename = resolveFilename(url, res.headers.get("content-disposition"));
+    return { buffer, contentType, filename };
+  } finally {
+    await release();
+  }
 }
 
 type ZulipUploadResponse = ZulipApiSuccess & {
