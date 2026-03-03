@@ -1,5 +1,5 @@
 {
-  "name": "openclaw-zulip",
+  "name": "openclaw-zulip-plus",
   "version": "1.0.0",
   "description": "Merged Zulip channel plugin for OpenClaw - combines features from multiple implementations",
   "main": "index.ts",
@@ -45,7 +45,7 @@
       "order": 70
     },
     "install": {
-      "npmSpec": "openclaw-zulip",
+      "npmSpec": "openclaw-zulip-plus",
       "localPath": "extensions/zulip",
       "defaultChoice": "npm"
     }
