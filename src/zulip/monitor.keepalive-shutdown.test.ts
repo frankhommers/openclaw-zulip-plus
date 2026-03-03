@@ -47,6 +47,13 @@ describe("monitor keepalive + shutdown helpers", () => {
     );
   });
 
+  it("formats last activity in provided timezone", () => {
+    const ts = Date.UTC(2026, 2, 3, 7, 39, 58);
+    expect(buildKeepaliveMessageContent(25_000, ts, "UTC")).toBe(
+      "🔧 Still working... (25s elapsed), last activity 07:39:58",
+    );
+  });
+
   it("sends shutdown notice once and swallows errors", async () => {
     const sendNotice = vi.fn().mockRejectedValue(new Error("boom"));
     const log = vi.fn();

@@ -145,7 +145,7 @@ type ZulipMeResponse = {
 };
 
 export const DEFAULT_DISPATCH_WAIT_FOR_IDLE_TIMEOUT_MS = 30_000;
-export const KEEPALIVE_INITIAL_DELAY_MS = 25_000;
+export const KEEPALIVE_INITIAL_DELAY_MS = 10_000;
 export const KEEPALIVE_REPEAT_INTERVAL_MS = 10_000;
 export const ZULIP_RECOVERY_NOTICE = "🔄 Gateway restarted - resuming the previous task now...";
 const DEFAULT_ONCHAR_PREFIXES = [">", "!"];
@@ -172,8 +172,34 @@ function formatClockHms(timestampMs: number): string {
   return `${hh}:${mm}:${ss}`;
 }
 
-export function buildKeepaliveMessageContent(elapsedMs: number, lastActivityAtMs = Date.now()): string {
-  const timestamp = formatClockHms(lastActivityAtMs);
+function formatClockHmsInTimeZone(timestampMs: number, timeZone?: string): string {
+  if (timeZone?.trim()) {
+    try {
+      return new Intl.DateTimeFormat(undefined, {
+        hour12: false,
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        timeZone,
+      }).format(new Date(timestampMs));
+    } catch {
+      // Fall back to local clock formatting.
+    }
+  }
+  return formatClockHms(timestampMs);
+}
+
+function resolveKeepaliveTimeZone(cfg: OpenClawConfig): string | undefined {
+  const tz = cfg.agents?.defaults?.userTimezone?.trim();
+  return tz || undefined;
+}
+
+export function buildKeepaliveMessageContent(
+  elapsedMs: number,
+  lastActivityAtMs = Date.now(),
+  timeZone?: string,
+): string {
+  const timestamp = formatClockHmsInTimeZone(lastActivityAtMs, timeZone);
   return `🔧 Still working... (${formatKeepaliveElapsed(elapsedMs)} elapsed), last activity ${timestamp}`;
 }
 
@@ -1624,6 +1650,7 @@ export async function monitorZulipProvider(
 
       let keepaliveMessageId: number | undefined;
       let keepaliveLastActivityAtMs = Date.now();
+      const keepaliveTimeZone = resolveKeepaliveTimeZone(cfg);
 
       const stopKeepalive = isDM
         ? () => {}
@@ -1636,7 +1663,11 @@ export async function monitorZulipProvider(
                 toolProgress.addHeartbeat(elapsedMs);
                 return;
               }
-              const content = buildKeepaliveMessageContent(elapsedMs, keepaliveLastActivityAtMs);
+              const content = buildKeepaliveMessageContent(
+                elapsedMs,
+                keepaliveLastActivityAtMs,
+                keepaliveTimeZone,
+              );
               if (keepaliveMessageId) {
                 await editZulipStreamMessage({
                   auth,
