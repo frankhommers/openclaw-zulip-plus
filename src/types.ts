@@ -119,3 +119,11 @@ export type ZulipAccountConfig = {
 export type ZulipConfig = {
   accounts?: Record<string, ZulipAccountConfig>;
 } & ZulipAccountConfig;
+
+/** Magic token for dynamic stream discovery via bot subscriptions. */
+export const SUBSCRIBED_TOKEN = "{subscribed}";
+
+/** Returns true if the streams array contains the `{subscribed}` token. */
+export function isSubscribedMode(streams: string[]): boolean {
+  return streams.some((s) => s.trim() === SUBSCRIBED_TOKEN);
+}

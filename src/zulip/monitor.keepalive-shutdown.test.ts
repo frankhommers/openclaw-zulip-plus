@@ -39,8 +39,12 @@ describe("monitor keepalive + shutdown helpers", () => {
   });
 
   it("builds concise keepalive copy with elapsed time", () => {
-    expect(buildKeepaliveMessageContent(29_000)).toBe("🔧 Still working... (29s elapsed)");
-    expect(buildKeepaliveMessageContent(120_000)).toBe("🔧 Still working... (2m elapsed)");
+    expect(buildKeepaliveMessageContent(29_000, new Date("2026-03-03T14:23:10").getTime())).toBe(
+      "🔧 Still working... (29s elapsed), last activity 14:23:10",
+    );
+    expect(buildKeepaliveMessageContent(120_000, new Date("2026-03-03T08:00:00").getTime())).toBe(
+      "🔧 Still working... (2m elapsed), last activity 08:00:00",
+    );
   });
 
   it("sends shutdown notice once and swallows errors", async () => {

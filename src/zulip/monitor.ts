@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import type { OpenClawConfig, ReplyPayload, RuntimeEnv } from "openclaw/plugin-sdk";
 import { createReplyPrefixOptions, createScopedPairingAccess } from "openclaw/plugin-sdk";
 import { getZulipRuntime } from "../runtime.js";
+import { isSubscribedMode, SUBSCRIBED_TOKEN } from "../types.js";
 import {
   resolveZulipAccount,
   type ResolvedZulipAccount,
@@ -33,7 +34,12 @@ import {
   stopReactionButtonSessionCleanup,
 } from "./reaction-buttons.js";
 import { addZulipReaction, removeZulipReaction } from "./reactions.js";
-import { sanitizeBackticks, sendZulipStreamMessage } from "./send.js";
+import {
+  deleteZulipMessage,
+  editZulipStreamMessage,
+  sanitizeBackticks,
+  sendZulipStreamMessage,
+} from "./send.js";
 import { ToolProgressAccumulator } from "./tool-progress.js";
 import { downloadZulipUploads, resolveOutboundMedia, uploadZulipFile } from "./uploads.js";
 
@@ -103,7 +109,8 @@ type ZulipEvent = {
   orig_subject?: string;
   topic?: string;
   orig_topic?: string;
-  op?: "add" | "remove";
+  op?: "add" | "remove" | "update" | "peer_add" | "peer_remove";
+  subscriptions?: Array<{ stream_id?: number; name?: string }>;
   message_id?: number;
   emoji_name?: string;
   emoji_code?: string;
@@ -113,6 +120,13 @@ type ZulipEvent = {
     full_name?: string;
     user_id?: number;
   };
+};
+
+type ZulipSubscriptionEvent = {
+  id?: number;
+  type: "subscription";
+  op: "add" | "remove" | "update" | "peer_add" | "peer_remove";
+  subscriptions?: Array<{ stream_id?: number; name?: string }>;
 };
 
 type ZulipEventsResponse = {
@@ -132,7 +146,7 @@ type ZulipMeResponse = {
 
 export const DEFAULT_DISPATCH_WAIT_FOR_IDLE_TIMEOUT_MS = 30_000;
 export const KEEPALIVE_INITIAL_DELAY_MS = 25_000;
-export const KEEPALIVE_REPEAT_INTERVAL_MS = 60_000;
+export const KEEPALIVE_REPEAT_INTERVAL_MS = 10_000;
 export const ZULIP_RECOVERY_NOTICE = "🔄 Gateway restarted - resuming the previous task now...";
 const DEFAULT_ONCHAR_PREFIXES = [">", "!"];
 
@@ -150,8 +164,17 @@ function formatKeepaliveElapsed(elapsedMs: number): string {
   return `${minutes}m ${seconds}s`;
 }
 
-export function buildKeepaliveMessageContent(elapsedMs: number): string {
-  return `🔧 Still working... (${formatKeepaliveElapsed(elapsedMs)} elapsed)`;
+function formatClockHms(timestampMs: number): string {
+  const date = new Date(timestampMs);
+  const hh = String(date.getHours()).padStart(2, "0");
+  const mm = String(date.getMinutes()).padStart(2, "0");
+  const ss = String(date.getSeconds()).padStart(2, "0");
+  return `${hh}:${mm}:${ss}`;
+}
+
+export function buildKeepaliveMessageContent(elapsedMs: number, lastActivityAtMs = Date.now()): string {
+  const timestamp = formatClockHms(lastActivityAtMs);
+  return `🔧 Still working... (${formatKeepaliveElapsed(elapsedMs)} elapsed), last activity ${timestamp}`;
 }
 
 export function startPeriodicKeepalive(params: {
@@ -537,20 +560,23 @@ async function fetchZulipMe(auth: ZulipAuth, abortSignal?: AbortSignal): Promise
 
 async function registerQueue(params: {
   auth: ZulipAuth;
-  stream: string;
+  stream?: string;
+  eventTypes?: string[];
   abortSignal?: AbortSignal;
 }): Promise<{ queueId: string; lastEventId: number }> {
   const core = getZulipRuntime();
-  const narrow = buildZulipRegisterNarrow(params.stream);
+  const form: Record<string, string> = {
+    event_types: JSON.stringify(params.eventTypes ?? ["message", "reaction", "update_message"]),
+    apply_markdown: "false",
+  };
+  if (params.stream) {
+    form.narrow = buildZulipRegisterNarrow(params.stream);
+  }
   const res = await zulipRequest<ZulipRegisterResponse>({
     auth: params.auth,
     method: "POST",
     path: "/api/v1/register",
-    form: {
-      event_types: JSON.stringify(["message", "reaction", "update_message"]),
-      apply_markdown: "false",
-      narrow,
-    },
+    form,
     abortSignal: params.abortSignal,
   });
   if (res.result !== "success" || !res.queue_id || typeof res.last_event_id !== "number") {
@@ -558,8 +584,41 @@ async function registerQueue(params: {
   }
   core.logging
     .getChildLogger({ channel: "zulip" })
-    .info(`[zulip] registered queue ${res.queue_id} (narrow=stream:${params.stream})`);
+    .info(
+      params.stream
+        ? `[zulip] registered queue ${res.queue_id} (narrow=stream:${params.stream})`
+        : `[zulip] registered queue ${res.queue_id}`,
+    );
   return { queueId: res.queue_id, lastEventId: res.last_event_id };
+}
+
+async function fetchSubscribedStreams(params: {
+  auth: ZulipAuth;
+  abortSignal?: AbortSignal;
+}): Promise<string[]> {
+  const res = await zulipRequest<{
+    result: "success" | "error";
+    msg?: string;
+    subscriptions?: Array<{ name?: string }>;
+  }>({
+    auth: params.auth,
+    method: "GET",
+    path: "/api/v1/users/me/subscriptions",
+    abortSignal: params.abortSignal,
+  });
+  if (res.result !== "success") {
+    throw new Error(res.msg || "Failed to fetch Zulip subscriptions");
+  }
+  const normalized = (res.subscriptions ?? [])
+    .map((entry) => normalizeStreamName(entry.name))
+    .filter(Boolean);
+  return Array.from(new Set(normalized));
+}
+
+function extractSubscribedStreamNames(evt: ZulipSubscriptionEvent): string[] {
+  return Array.from(
+    new Set((evt.subscriptions ?? []).map((entry) => normalizeStreamName(entry.name)).filter(Boolean)),
+  );
 }
 
 async function pollEvents(params: {
@@ -634,7 +693,7 @@ function shouldIgnoreMessage(params: {
   if (!stream) {
     return { ignore: true, reason: "missing-stream" };
   }
-  if (params.streams.length > 0 && !params.streams.includes(stream)) {
+  if (params.streams.length > 0 && !isSubscribedMode(params.streams) && !params.streams.includes(stream)) {
     return { ignore: true, reason: "not-allowed-stream" };
   }
   return { ignore: false };
@@ -1563,23 +1622,40 @@ export async function monitorZulipProvider(
         ? withWorkflowReactionStages(dispatcher, reactions, reactionController, abortSignal)
         : dispatcher;
 
+      let keepaliveMessageId: number | undefined;
+      let keepaliveLastActivityAtMs = Date.now();
+
       const stopKeepalive = isDM
         ? () => {}
         : startPeriodicKeepalive({
             sendPing: async (elapsedMs) => {
+              keepaliveLastActivityAtMs = Date.now();
               // If tool progress has an active batched message, update it with
               // a heartbeat instead of sending a separate keepalive message.
               if (toolProgress?.hasContent) {
                 toolProgress.addHeartbeat(elapsedMs);
                 return;
               }
-              await sendZulipStreamMessage({
+              const content = buildKeepaliveMessageContent(elapsedMs, keepaliveLastActivityAtMs);
+              if (keepaliveMessageId) {
+                await editZulipStreamMessage({
+                  auth,
+                  messageId: keepaliveMessageId,
+                  content,
+                  abortSignal: deliverySignal,
+                });
+                return;
+              }
+              const response = await sendZulipStreamMessage({
                 auth,
                 stream,
                 topic,
-                content: buildKeepaliveMessageContent(elapsedMs),
+                content,
                 abortSignal: deliverySignal,
               });
+              if (typeof response.id === "number") {
+                keepaliveMessageId = response.id;
+              }
             },
           });
 
@@ -1650,6 +1726,14 @@ export async function monitorZulipProvider(
           }
           // Clean up periodic keepalive timers.
           stopKeepalive();
+          if (keepaliveMessageId) {
+            await deleteZulipMessage({
+              auth,
+              messageId: keepaliveMessageId,
+              abortSignal: deliverySignal,
+            }).catch(() => undefined);
+            keepaliveMessageId = undefined;
+          }
           // Clean up typing refresh interval (before stopTypingIndicator)
           clearInterval(typingRefreshInterval);
           // Clean up delivery abort controller listener/timer (do not hard-abort here).
@@ -2004,7 +2088,11 @@ export async function monitorZulipProvider(
         return;
       }
 
-      if (account.streams.length > 0 && !account.streams.includes(source.stream)) {
+      if (
+        account.streams.length > 0 &&
+        !isSubscribedMode(account.streams) &&
+        !account.streams.includes(source.stream)
+      ) {
         return;
       }
 
@@ -2112,7 +2200,8 @@ export async function monitorZulipProvider(
       }
     };
 
-    const pollStreamQueue = async (stream: string) => {
+    const pollStreamQueue = async (stream: string, streamAbortSignal?: AbortSignal) => {
+      const loopAbortSignal = streamAbortSignal ?? abortSignal;
       let queueId = "";
       let lastEventId = -1;
       let retry = 0;
@@ -2147,7 +2236,7 @@ export async function monitorZulipProvider(
       let lastSeenMsgId = 0;
       const FRESHNESS_INTERVAL_MS = 30_000;
       const freshnessTimer = setInterval(async () => {
-        if (stopped || abortSignal.aborted || lastSeenMsgId === 0) return;
+        if (stopped || loopAbortSignal.aborted || lastSeenMsgId === 0) return;
         try {
           const recent = await zulipRequest<{ result: string; messages?: ZulipEventMessage[] }>({
             auth,
@@ -2160,7 +2249,7 @@ export async function monitorZulipProvider(
               narrow: JSON.stringify([["stream", stream]]),
               apply_markdown: "false",
             },
-            abortSignal,
+            abortSignal: loopAbortSignal,
           });
           if (recent.result === "success" && recent.messages) {
             let caught = 0;
@@ -2184,12 +2273,12 @@ export async function monitorZulipProvider(
         }
       }, FRESHNESS_INTERVAL_MS);
 
-      while (!stopped && !abortSignal.aborted) {
+      while (!stopped && !loopAbortSignal.aborted) {
         try {
           if (!queueId) {
             stage = "register";
             const wasReregistration = lastEventId !== -1;
-            const reg = await registerQueue({ auth, stream, abortSignal });
+            const reg = await registerQueue({ auth, stream, abortSignal: loopAbortSignal });
             queueId = reg.queueId;
             lastEventId = reg.lastEventId;
 
@@ -2210,7 +2299,7 @@ export async function monitorZulipProvider(
                     narrow: JSON.stringify([["stream", stream]]),
                     apply_markdown: "false",
                   },
-                  abortSignal,
+                  abortSignal: loopAbortSignal,
                 });
                 if (recent.result === "success" && recent.messages) {
                   for (const msg of recent.messages) {
@@ -2236,7 +2325,7 @@ export async function monitorZulipProvider(
           logger.warn(
             `[zulip-debug][${account.accountId}] polling events (queue=${queueId.slice(0, 8)}, lastEventId=${lastEventId}, stream=${stream})`,
           );
-          const events = await pollEvents({ auth, queueId, lastEventId, abortSignal });
+          const events = await pollEvents({ auth, queueId, lastEventId, abortSignal: loopAbortSignal });
           if (events.result !== "success") {
             throw new Error(events.msg || "Zulip events poll failed");
           }
@@ -2320,7 +2409,7 @@ export async function monitorZulipProvider(
           // hit 429s.
           if (messages.length === 0 && reactionEvents.length === 0) {
             const jitterMs = Math.floor(Math.random() * 250);
-            await sleep(2000 + jitterMs, abortSignal).catch(() => undefined);
+            await sleep(2000 + jitterMs, loopAbortSignal).catch(() => undefined);
             retry = 0;
             continue;
           }
@@ -2332,16 +2421,16 @@ export async function monitorZulipProvider(
               runtime.error?.(`zulip: message processing failed: ${String(err)}`);
             });
             // Small stagger between starting each message for natural pacing
-            await sleep(200, abortSignal).catch(() => undefined);
+            await sleep(200, loopAbortSignal).catch(() => undefined);
           }
 
           retry = 0;
         } catch (err) {
           // FIX: Only break if explicitly stopped, NOT on abort
           // Abort errors (timeouts) should trigger queue re-registration
-          if (stopped) {
-            break;
-          }
+            if (stopped || loopAbortSignal.aborted) {
+              break;
+            }
 
           const status = extractZulipHttpStatus(err);
           const retryAfterMs = (err as ZulipHttpError).retryAfterMs;
@@ -2373,7 +2462,7 @@ export async function monitorZulipProvider(
           logger.warn(
             `[zulip:${account.accountId}] monitor error (stream=${stream}, stage=${stage}, attempt=${retry}): ${String(err)} (retry in ${backoffMs}ms)`,
           );
-          await sleep(backoffMs, abortSignal).catch(() => undefined);
+          await sleep(backoffMs, loopAbortSignal).catch(() => undefined);
         }
       }
 
@@ -2397,13 +2486,157 @@ export async function monitorZulipProvider(
 
     await replayPendingCheckpoints();
 
-    const plan = buildZulipQueuePlan(account.streams);
-    if (plan.length === 0) {
-      throw new Error(
-        `Zulip streams allowlist missing for account "${account.accountId}" (set channels.zulip.streams)`,
-      );
+    if (!isSubscribedMode(account.streams)) {
+      const plan = buildZulipQueuePlan(account.streams);
+      if (plan.length === 0) {
+        throw new Error(
+          `Zulip streams allowlist missing for account "${account.accountId}" (set channels.zulip.streams)`,
+        );
+      }
+      await Promise.all(plan.map((entry) => pollStreamQueue(entry.stream)));
+      return;
     }
-    await Promise.all(plan.map((entry) => pollStreamQueue(entry.stream)));
+
+    logger.info(
+      `[zulip:${account.accountId}] dynamic stream mode active (${SUBSCRIBED_TOKEN}) - monitoring all subscribed channels`,
+    );
+
+    const activeStreamPolls = new Map<
+      string,
+      {
+        abort: AbortController;
+        done: Promise<void>;
+      }
+    >();
+
+    const startStreamPoll = (stream: string) => {
+      const normalized = normalizeStreamName(stream);
+      if (!normalized || activeStreamPolls.has(normalized)) {
+        return;
+      }
+      const streamAbort = new AbortController();
+      const onParentAbort = () => streamAbort.abort();
+      abortSignal.addEventListener("abort", onParentAbort, { once: true });
+      const done = pollStreamQueue(normalized, streamAbort.signal).finally(() => {
+        abortSignal.removeEventListener("abort", onParentAbort);
+        activeStreamPolls.delete(normalized);
+      });
+      activeStreamPolls.set(normalized, { abort: streamAbort, done });
+      logger.info(`[zulip:${account.accountId}] now monitoring stream "${normalized}"`);
+    };
+
+    const stopStreamPoll = (stream: string) => {
+      const normalized = normalizeStreamName(stream);
+      if (!normalized) {
+        return;
+      }
+      const active = activeStreamPolls.get(normalized);
+      if (!active) {
+        return;
+      }
+      active.abort.abort();
+      logger.info(`[zulip:${account.accountId}] stopped monitoring stream "${normalized}"`);
+    };
+
+    const initialStreams = await fetchSubscribedStreams({ auth, abortSignal });
+    for (const stream of initialStreams) {
+      startStreamPoll(stream);
+    }
+    logger.info(
+      `[zulip:${account.accountId}] initialized ${initialStreams.length} subscribed stream poll(s)`,
+    );
+
+    let watcherQueueId = "";
+    let watcherLastEventId = -1;
+    let watcherRetry = 0;
+
+    while (!stopped && !abortSignal.aborted) {
+      try {
+        if (!watcherQueueId) {
+          const reg = await registerQueue({
+            auth,
+            eventTypes: ["subscription"],
+            abortSignal,
+          });
+          watcherQueueId = reg.queueId;
+          watcherLastEventId = reg.lastEventId;
+          watcherRetry = 0;
+          logger.info(`[zulip:${account.accountId}] subscription watcher registered`);
+        }
+
+        const events = await pollEvents({
+          auth,
+          queueId: watcherQueueId,
+          lastEventId: watcherLastEventId,
+          abortSignal,
+        });
+        if (events.result !== "success") {
+          throw new Error(events.msg || "Zulip subscription poll failed");
+        }
+        const list = events.events ?? [];
+        for (const evt of list) {
+          if (typeof evt.id === "number" && evt.id > watcherLastEventId) {
+            watcherLastEventId = evt.id;
+          }
+
+          if (evt.type !== "subscription") {
+            continue;
+          }
+
+          const subEvt = evt as ZulipSubscriptionEvent;
+          const streams = extractSubscribedStreamNames(subEvt);
+          if (subEvt.op === "add") {
+            for (const stream of streams) {
+              startStreamPoll(stream);
+            }
+          } else if (subEvt.op === "remove") {
+            for (const stream of streams) {
+              stopStreamPoll(stream);
+            }
+          }
+        }
+
+        if (list.length === 0) {
+          await sleep(1500, abortSignal).catch(() => undefined);
+        }
+      } catch (err) {
+        if (stopped || abortSignal.aborted) {
+          break;
+        }
+        if (watcherQueueId) {
+          await zulipRequest({
+            auth,
+            method: "DELETE",
+            path: "/api/v1/events",
+            form: { queue_id: watcherQueueId },
+          }).catch(() => undefined);
+          watcherQueueId = "";
+        }
+        watcherRetry += 1;
+        const backoffMs = computeZulipMonitorBackoffMs({
+          attempt: watcherRetry,
+          status: null,
+        });
+        logger.warn(
+          `[zulip:${account.accountId}] subscription watcher error (attempt=${watcherRetry}): ${String(err)} (retry in ${backoffMs}ms)`,
+        );
+        await sleep(backoffMs, abortSignal).catch(() => undefined);
+      }
+    }
+
+    for (const active of activeStreamPolls.values()) {
+      active.abort.abort();
+    }
+    await Promise.allSettled(Array.from(activeStreamPolls.values()).map((entry) => entry.done));
+
+    if (watcherQueueId) {
+      await zulipRequest({
+        auth,
+        method: "DELETE",
+        path: "/api/v1/events",
+        form: { queue_id: watcherQueueId },
+      }).catch(() => undefined);
+    }
   };
 
   const done = run()

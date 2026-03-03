@@ -292,3 +292,17 @@ export async function editZulipStreamMessage(params: {
     retry: { maxRetries: 3, baseDelayMs: 500, maxDelayMs: 5_000 },
   });
 }
+
+export async function deleteZulipMessage(params: {
+  auth: ZulipAuth;
+  messageId: number;
+  abortSignal?: AbortSignal;
+}): Promise<ZulipApiSuccess> {
+  return await zulipRequestWithRetry<ZulipApiSuccess>({
+    auth: params.auth,
+    method: "DELETE",
+    path: `/api/v1/messages/${encodeURIComponent(String(params.messageId))}`,
+    abortSignal: params.abortSignal,
+    retry: { maxRetries: 3, baseDelayMs: 500, maxDelayMs: 5_000 },
+  });
+}

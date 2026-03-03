@@ -1,6 +1,7 @@
 import type { ChannelOnboardingAdapter, OpenClawConfig, WizardPrompter } from "openclaw/plugin-sdk";
 import { DEFAULT_ACCOUNT_ID, normalizeAccountId } from "openclaw/plugin-sdk";
 import { promptAccountId } from "./onboarding-helpers.js";
+import { SUBSCRIBED_TOKEN } from "./types.js";
 import {
   listZulipAccountIds,
   resolveDefaultZulipAccountId,
@@ -15,7 +16,8 @@ async function noteZulipSetup(prompter: WizardPrompter): Promise<void> {
     [
       "1) Create a Zulip bot and copy its API key",
       "2) Ensure the bot is subscribed to the stream(s) you want to monitor",
-      "3) Configure base URL + bot email + API key + stream allowlist",
+      `3) Choose stream mode: explicit allowlist, or \"${SUBSCRIBED_TOKEN}\" for auto-discovery`,
+      "4) Configure base URL + bot email + API key",
       "Docs: https://docs.openclaw.ai/channels/zulip",
     ].join("\n"),
     "Zulip bot credentials",
@@ -147,16 +149,35 @@ export const zulipOnboardingAdapter: ChannelOnboardingAdapter = {
       ).trim();
     }
 
-    const streamsRaw = String(
-      await prompter.text({
-        message: "Streams to monitor (comma-separated, e.g. marcel-ai, general)",
-        validate: (value) => (value?.trim() ? undefined : "Required"),
-      }),
-    );
-    streams = streamsRaw
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const streamMode = await prompter.select({
+      message: "How should Zulip streams be monitored?",
+      options: [
+        {
+          value: "subscribed",
+          label: `Auto-discover subscribed streams (${SUBSCRIBED_TOKEN})`,
+        },
+        {
+          value: "allowlist",
+          label: "Manual allowlist (comma-separated names)",
+        },
+      ],
+      initialValue: resolvedAccount.streams.includes(SUBSCRIBED_TOKEN) ? "subscribed" : "allowlist",
+    });
+
+    if (streamMode === "subscribed") {
+      streams = [SUBSCRIBED_TOKEN];
+    } else {
+      const streamsRaw = String(
+        await prompter.text({
+          message: "Streams to monitor (comma-separated, e.g. marcel-ai, general)",
+          validate: (value) => (value?.trim() ? undefined : "Required"),
+        }),
+      );
+      streams = streamsRaw
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+    }
 
     // Validate credentials before saving config.
     const probeUrl = baseUrl || resolvedAccount.baseUrl;

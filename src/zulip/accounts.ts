@@ -1,6 +1,11 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import { DEFAULT_ACCOUNT_ID, normalizeAccountId } from "openclaw/plugin-sdk";
-import type { ZulipAccountConfig, ZulipChatMode, ZulipReactionConfig } from "../types.js";
+import {
+  SUBSCRIBED_TOKEN,
+  type ZulipAccountConfig,
+  type ZulipChatMode,
+  type ZulipReactionConfig,
+} from "../types.js";
 import { normalizeEmojiName, normalizeStreamName, normalizeTopic } from "./normalize.js";
 
 export type ZulipTokenSource = "env" | "config" | "none";
@@ -165,7 +170,11 @@ function resolveConfiguredBaseUrl(cfg: OpenClawConfig, accountId: string): strin
 }
 
 function normalizeStreamAllowlist(streams?: string[]): string[] {
-  const normalized = (streams ?? []).map((entry) => normalizeStreamName(entry)).filter(Boolean);
+  const entries = streams ?? [];
+  if (entries.some((s) => s.trim() === SUBSCRIBED_TOKEN)) {
+    return [SUBSCRIBED_TOKEN];
+  }
+  const normalized = entries.map((entry) => normalizeStreamName(entry)).filter(Boolean);
   return Array.from(new Set(normalized));
 }
 

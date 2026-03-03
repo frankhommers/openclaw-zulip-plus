@@ -2,6 +2,7 @@ import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import { createReplyPrefixOptions } from "openclaw/plugin-sdk";
 import { describe, expect, it } from "vitest";
 import { zulipPlugin } from "./channel.js";
+import { SUBSCRIBED_TOKEN } from "./types.js";
 import { resolveZulipAccount } from "./zulip/accounts.js";
 import { normalizeEmojiName } from "./zulip/normalize.js";
 import { parseZulipTarget } from "./zulip/targets.js";
@@ -99,6 +100,23 @@ describe("zulipPlugin", () => {
 
       const account = resolveZulipAccount({ cfg, accountId: "default" });
       expect(account.baseUrl).toBe("https://base-site.example.com");
+    });
+
+    it("treats {subscribed} as an exclusive stream token", () => {
+      const cfg: OpenClawConfig = {
+        channels: {
+          zulip: {
+            enabled: true,
+            baseUrl: "https://zulip.example.com",
+            email: "bot@example.com",
+            apiKey: "key",
+            streams: ["general", SUBSCRIBED_TOKEN, "ops"],
+          },
+        },
+      };
+
+      const account = resolveZulipAccount({ cfg, accountId: "default" });
+      expect(account.streams).toEqual([SUBSCRIBED_TOKEN]);
     });
   });
 
