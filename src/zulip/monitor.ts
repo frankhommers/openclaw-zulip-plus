@@ -200,7 +200,7 @@ export function buildKeepaliveMessageContent(
   timeZone?: string,
 ): string {
   const timestamp = formatClockHmsInTimeZone(lastActivityAtMs, timeZone);
-  return `🔧 Still working... (${formatKeepaliveElapsed(elapsedMs)} elapsed), last activity ${timestamp}`;
+  return `🔧 Still working... (${formatKeepaliveElapsed(elapsedMs)} elapsed, last activity ${timestamp})`;
 }
 
 export function startPeriodicKeepalive(params: {
