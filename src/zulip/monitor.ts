@@ -182,6 +182,10 @@ export async function cleanupStaleStatusMessages(params: {
   const maxPerStream = params.maxPerStream ?? 50;
   let totalDeleted = 0;
 
+  params.logger.info(
+    `[zulip] stale status cleanup: scanning ${params.streams.length} stream(s) for leftover status messages`,
+  );
+
   for (const stream of params.streams) {
     let messages: Array<{ id: number; content: string }>;
     try {
@@ -198,6 +202,9 @@ export async function cleanupStaleStatusMessages(params: {
     }
 
     const stale = messages.filter((m) => isStaleStatusMessage(m.content));
+    params.logger.info(
+      `[zulip] stale status cleanup: stream "${stream}": ${messages.length} messages fetched, ${stale.length} stale`,
+    );
     for (const msg of stale) {
       try {
         await params.deleteMessage(msg.id);
@@ -217,6 +224,8 @@ export async function cleanupStaleStatusMessages(params: {
     params.logger.info(
       `[zulip] stale status cleanup: deleted ${totalDeleted} leftover status message(s) across ${params.streams.length} stream(s)`,
     );
+  } else {
+    params.logger.info(`[zulip] stale status cleanup: no stale messages found`);
   }
 }
 
@@ -1326,6 +1335,9 @@ export async function monitorZulipProvider(
         abortSignal,
       });
       if (res.result !== "success") {
+        logger.warn(
+          `[zulip] stale status cleanup: /messages API returned non-success for stream "${opts.stream}": ${JSON.stringify(res)}`,
+        );
         return [];
       }
       return res.messages ?? [];
