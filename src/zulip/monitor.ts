@@ -1919,7 +1919,7 @@ export async function monitorZulipProvider(
       let keepaliveLastActivityAtMs = Date.now();
       const keepaliveTimeZone = resolveKeepaliveTimeZone(cfg);
 
-      const stopKeepalive = isDM
+      const stopKeepalive = isDM || !account.workingMessages.enabled
         ? () => {}
         : startPeriodicKeepalive({
             sendPing: async (elapsedMs) => {

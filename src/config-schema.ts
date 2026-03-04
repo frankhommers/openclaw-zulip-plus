@@ -54,6 +54,12 @@ const ProcessingSpinnerSchema = z
   })
   .passthrough();
 
+const WorkingMessagesSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+  })
+  .passthrough();
+
 const ZulipAccountSchemaBase = z
   .object({
     name: z.string().optional(),
@@ -78,6 +84,7 @@ const ZulipAccountSchemaBase = z
     defaultTopic: z.string().optional(),
     reactions: ReactionSchema.optional(),
     processingSpinner: ProcessingSpinnerSchema.optional(),
+    workingMessages: WorkingMessagesSchema.optional(),
     textChunkLimit: z.number().int().positive().optional(),
     chunkMode: z.enum(["length", "newline"]).optional(),
     mediaMaxMb: z.number().int().positive().optional(),

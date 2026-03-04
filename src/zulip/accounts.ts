@@ -81,6 +81,9 @@ export type ResolvedZulipAccount = {
     emoji: string[];
     intervalMs: number;
   };
+  workingMessages: {
+    enabled: boolean;
+  };
   textChunkLimit: number;
   config: ZulipAccountConfig;
 };
@@ -304,6 +307,9 @@ export function resolveZulipAccount(params: {
     emoji: spinnerCfg?.emoji?.length ? spinnerCfg.emoji : DEFAULT_PROCESSING_SPINNER.emoji,
     intervalMs: spinnerCfg?.intervalMs ?? DEFAULT_PROCESSING_SPINNER.intervalMs,
   };
+  const workingMessages = {
+    enabled: merged.workingMessages?.enabled !== false,
+  };
   const textChunkLimit =
     typeof merged.textChunkLimit === "number" ? merged.textChunkLimit : DEFAULT_TEXT_CHUNK_LIMIT;
 
@@ -333,6 +339,7 @@ export function resolveZulipAccount(params: {
     defaultTopic,
     reactions,
     processingSpinner,
+    workingMessages,
     textChunkLimit,
     config: merged,
   };

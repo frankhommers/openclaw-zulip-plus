@@ -104,6 +104,11 @@ export type ZulipAccountConfig = {
     intervalMs?: number;
   };
 
+  /** "Still working..." messages during processing. Default: enabled. */
+  workingMessages?: {
+    enabled?: boolean;
+  };
+
   /** Maximum chars before chunking. */
   textChunkLimit?: number;
   chunkMode?: "length" | "newline";
