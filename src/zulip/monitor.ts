@@ -262,6 +262,107 @@ export async function cleanupStaleStatusMessages(params: {
   }
 }
 
+/**
+ * Collect all emoji names the bot might have left on messages as reactions:
+ * spinner emoji, workflow stage emoji (eyes, processing indicators).
+ */
+function collectStaleEmojiNames(account: ResolvedZulipAccount): string[] {
+  const names = new Set<string>();
+
+  // Spinner emoji
+  for (const e of account.processingSpinner.emoji) {
+    if (e) names.add(e);
+  }
+
+  // Workflow stage emoji (eyes, check, warning, etc.)
+  const stages = account.reactions.workflow.stages;
+  for (const name of [
+    stages.queued,
+    stages.processing,
+    stages.toolRunning,
+    stages.retrying,
+  ]) {
+    if (name) names.add(name);
+  }
+
+  // Legacy reaction emoji (onStart = eyes)
+  if (account.reactions.onStart) names.add(account.reactions.onStart);
+
+  return Array.from(names);
+}
+
+/**
+ * Remove stale bot reactions (spinner emoji, workflow emoji like eyes) from
+ * recent messages. This runs at startup to clean up after crashes/restarts.
+ */
+export async function cleanupStaleReactions(params: {
+  auth: ZulipAuth;
+  streams: string[];
+  botUserId: number;
+  /** Emoji names the bot may have left behind (spinner + workflow stages). */
+  staleEmojiNames: string[];
+  fetchMessages: (opts: {
+    stream: string;
+    limit: number;
+  }) => Promise<Array<{ id: number; reactions?: Array<{ emoji_name: string; user_id: number }> }>>;
+  removeReaction: (messageId: number, emojiName: string) => Promise<void>;
+  maxPerStream?: number;
+  logger: {
+    info: (msg: string) => void;
+    warn: (msg: string) => void;
+    debug?: (msg: string) => void;
+  };
+}): Promise<void> {
+  const maxPerStream = params.maxPerStream ?? 100;
+  const staleSet = new Set(params.staleEmojiNames);
+  let totalRemoved = 0;
+
+  if (staleSet.size === 0) {
+    return;
+  }
+
+  params.logger.info(
+    `[zulip] stale reaction cleanup: scanning ${params.streams.length} stream(s) for leftover bot reactions`,
+  );
+
+  for (const stream of params.streams) {
+    let messages: Array<{ id: number; reactions?: Array<{ emoji_name: string; user_id: number }> }>;
+    try {
+      messages = await params.fetchMessages({ stream, limit: maxPerStream });
+    } catch (err) {
+      params.logger.warn(
+        `[zulip] stale reaction cleanup: failed to fetch messages for stream "${stream}": ${err instanceof Error ? err.message : String(err)}`,
+      );
+      continue;
+    }
+
+    for (const msg of messages) {
+      const botReactions = (msg.reactions ?? []).filter(
+        (r) => r.user_id === params.botUserId && staleSet.has(r.emoji_name),
+      );
+      for (const reaction of botReactions) {
+        try {
+          await params.removeReaction(msg.id, reaction.emoji_name);
+          totalRemoved++;
+          params.logger.debug?.(
+            `[zulip] stale reaction cleanup: removed ${reaction.emoji_name} from message ${msg.id} in "${stream}"`,
+          );
+        } catch {
+          // Best effort — reaction may already be gone.
+        }
+      }
+    }
+  }
+
+  if (totalRemoved > 0) {
+    params.logger.info(
+      `[zulip] stale reaction cleanup: removed ${totalRemoved} leftover reaction(s) across ${params.streams.length} stream(s)`,
+    );
+  } else {
+    params.logger.info(`[zulip] stale reaction cleanup: no stale reactions found`);
+  }
+}
+
 const DEFAULT_ONCHAR_PREFIXES = [">", "!"];
 
 function formatKeepaliveElapsed(elapsedMs: number): string {
@@ -2813,6 +2914,50 @@ export async function monitorZulipProvider(
         maxPerStream: 500,
         logger,
       });
+
+      // Also remove stale bot reactions (spinner emoji, workflow indicators).
+      const staleEmoji = collectStaleEmojiNames(account);
+      if (staleEmoji.length > 0) {
+        const fetchStreamMessages = async (opts: {
+          stream: string;
+          limit: number;
+        }): Promise<Array<{ id: number; reactions?: Array<{ emoji_name: string; user_id: number }> }>> => {
+          const narrow = JSON.stringify([
+            { operator: "stream", operand: opts.stream },
+          ]);
+          const res = await zulipRequest<{
+            result: "success" | "error";
+            messages?: Array<{ id: number; reactions?: Array<{ emoji_name: string; user_id: number }> }>;
+          }>({
+            auth,
+            method: "GET",
+            path: "/api/v1/messages",
+            query: {
+              anchor: "newest",
+              num_before: String(opts.limit),
+              num_after: "0",
+              narrow,
+            },
+            abortSignal,
+          });
+          return res.result === "success" ? (res.messages ?? []) : [];
+        };
+
+        const removeReaction = async (messageId: number, emojiName: string): Promise<void> => {
+          await removeZulipReaction({ auth, messageId, emojiName, abortSignal });
+        };
+
+        await cleanupStaleReactions({
+          auth,
+          streams: streamsToClean,
+          botUserId,
+          staleEmojiNames: staleEmoji,
+          fetchMessages: fetchStreamMessages,
+          removeReaction,
+          maxPerStream: 100,
+          logger,
+        });
+      }
     }
 
     if (!isSubscribedMode(account.streams)) {
