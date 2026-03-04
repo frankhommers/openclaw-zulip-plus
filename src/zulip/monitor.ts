@@ -151,6 +151,75 @@ export const ZULIP_SHUTDOWN_NOTICE_PREFIX = "♻️ Gateway restart in progress"
 export const ZULIP_KEEPALIVE_PREFIX = "🔧 Still working...";
 export const ZULIP_RECOVERY_PREFIX = "🔄 Gateway restarted";
 export const ZULIP_RECOVERY_NOTICE = `${ZULIP_RECOVERY_PREFIX} - resuming the previous task now...`;
+
+const STALE_STATUS_PREFIXES = [
+  ZULIP_KEEPALIVE_PREFIX,
+  ZULIP_SHUTDOWN_NOTICE_PREFIX,
+  ZULIP_RECOVERY_PREFIX,
+];
+
+export function isStaleStatusMessage(content: string): boolean {
+  const trimmed = content.trim();
+  return STALE_STATUS_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
+}
+
+export async function cleanupStaleStatusMessages(params: {
+  auth: ZulipAuth;
+  streams: string[];
+  fetchMessages: (opts: {
+    stream: string;
+    senderEmail: string;
+    limit: number;
+  }) => Promise<Array<{ id: number; content: string }>>;
+  deleteMessage: (messageId: number) => Promise<void>;
+  maxPerStream?: number;
+  logger: {
+    info: (msg: string) => void;
+    warn: (msg: string) => void;
+    debug?: (msg: string) => void;
+  };
+}): Promise<void> {
+  const maxPerStream = params.maxPerStream ?? 50;
+  let totalDeleted = 0;
+
+  for (const stream of params.streams) {
+    let messages: Array<{ id: number; content: string }>;
+    try {
+      messages = await params.fetchMessages({
+        stream,
+        senderEmail: params.auth.email,
+        limit: maxPerStream,
+      });
+    } catch (err) {
+      params.logger.warn(
+        `[zulip] stale status cleanup: failed to fetch messages for stream "${stream}": ${err instanceof Error ? err.message : String(err)}`,
+      );
+      continue;
+    }
+
+    const stale = messages.filter((m) => isStaleStatusMessage(m.content));
+    for (const msg of stale) {
+      try {
+        await params.deleteMessage(msg.id);
+        totalDeleted++;
+        params.logger.debug?.(
+          `[zulip] stale status cleanup: deleted message ${msg.id} in stream "${stream}"`,
+        );
+      } catch (err) {
+        params.logger.warn(
+          `[zulip] stale status cleanup: failed to delete message ${msg.id} in stream "${stream}": ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+  }
+
+  if (totalDeleted > 0) {
+    params.logger.info(
+      `[zulip] stale status cleanup: deleted ${totalDeleted} leftover status message(s) across ${params.streams.length} stream(s)`,
+    );
+  }
+}
+
 const DEFAULT_ONCHAR_PREFIXES = [">", "!"];
 
 function formatKeepaliveElapsed(elapsedMs: number): string {
