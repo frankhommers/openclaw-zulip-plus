@@ -76,6 +76,11 @@ export type ResolvedZulipAccount = {
   responsePrefix: string;
   defaultTopic: string;
   reactions: ResolvedZulipReactions;
+  processingSpinner: {
+    enabled: boolean;
+    emoji: string[];
+    intervalMs: number;
+  };
   textChunkLimit: number;
   config: ZulipAccountConfig;
 };
@@ -106,6 +111,21 @@ const DEFAULT_REACTIONS: ResolvedZulipReactions = {
     enabled: false,
     includeRemoveOps: false,
   },
+};
+
+const DEFAULT_PROCESSING_SPINNER = {
+  enabled: false,
+  emoji: [
+    "new_moon",
+    "waxing_crescent_moon",
+    "first_quarter_moon",
+    "waxing_moon",
+    "full_moon",
+    "waning_gibbous_moon",
+    "last_quarter_moon",
+    "waning_crescent_moon",
+  ],
+  intervalMs: 2000,
 };
 
 function listConfiguredAccountIds(cfg: OpenClawConfig): string[] {
@@ -278,6 +298,12 @@ export function resolveZulipAccount(params: {
   const responsePrefix = merged.responsePrefix ?? "";
   const defaultTopic = normalizeTopic(merged.defaultTopic) || DEFAULT_TOPIC;
   const reactions = resolveReactions(merged.reactions);
+  const spinnerCfg = merged.processingSpinner;
+  const processingSpinner = {
+    enabled: spinnerCfg?.enabled ?? DEFAULT_PROCESSING_SPINNER.enabled,
+    emoji: spinnerCfg?.emoji?.length ? spinnerCfg.emoji : DEFAULT_PROCESSING_SPINNER.emoji,
+    intervalMs: spinnerCfg?.intervalMs ?? DEFAULT_PROCESSING_SPINNER.intervalMs,
+  };
   const textChunkLimit =
     typeof merged.textChunkLimit === "number" ? merged.textChunkLimit : DEFAULT_TEXT_CHUNK_LIMIT;
 
@@ -306,6 +332,7 @@ export function resolveZulipAccount(params: {
     responsePrefix,
     defaultTopic,
     reactions,
+    processingSpinner,
     textChunkLimit,
     config: merged,
   };

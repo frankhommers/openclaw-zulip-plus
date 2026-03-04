@@ -97,6 +97,13 @@ export type ZulipAccountConfig = {
   /** Reaction indicators while responding. */
   reactions?: ZulipReactionConfig;
 
+  /** Animated emoji spinner during processing. */
+  processingSpinner?: {
+    enabled?: boolean;
+    emoji?: string[];
+    intervalMs?: number;
+  };
+
   /** Maximum chars before chunking. */
   textChunkLimit?: number;
   chunkMode?: "length" | "newline";

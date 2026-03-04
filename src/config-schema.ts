@@ -46,6 +46,14 @@ const ReactionSchema = z
   })
   .passthrough();
 
+const ProcessingSpinnerSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    emoji: z.array(z.string()).optional(),
+    intervalMs: z.number().int().positive().optional(),
+  })
+  .passthrough();
+
 const ZulipAccountSchemaBase = z
   .object({
     name: z.string().optional(),
@@ -69,6 +77,7 @@ const ZulipAccountSchemaBase = z
     alwaysReply: z.boolean().optional(),
     defaultTopic: z.string().optional(),
     reactions: ReactionSchema.optional(),
+    processingSpinner: ProcessingSpinnerSchema.optional(),
     textChunkLimit: z.number().int().positive().optional(),
     chunkMode: z.enum(["length", "newline"]).optional(),
     mediaMaxMb: z.number().int().positive().optional(),

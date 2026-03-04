@@ -356,6 +356,111 @@ export function startPeriodicKeepalive(params: {
   };
 }
 
+export function startProcessingSpinner(params: {
+  auth: ZulipAuth;
+  messageId: number;
+  emoji: string[];
+  intervalMs: number;
+  addReaction: (params: {
+    auth: ZulipAuth;
+    messageId: number;
+    emojiName: string;
+    abortSignal?: AbortSignal;
+    log?: (msg: string) => void;
+  }) => Promise<unknown>;
+  removeReaction: (params: {
+    auth: ZulipAuth;
+    messageId: number;
+    emojiName: string;
+    abortSignal?: AbortSignal;
+  }) => Promise<unknown>;
+  abortSignal?: AbortSignal;
+  log?: (msg: string) => void;
+}): () => Promise<void> {
+  if (params.emoji.length === 0) {
+    return async () => {};
+  }
+
+  let currentIndex = 0;
+  let currentEmoji: string | undefined;
+  let stopped = false;
+  let timer: ReturnType<typeof setInterval> | undefined;
+  let tickChain = Promise.resolve();
+
+  const addEmoji = async (name: string): Promise<boolean> => {
+    try {
+      await params.addReaction({
+        auth: params.auth,
+        messageId: params.messageId,
+        emojiName: name,
+        abortSignal: params.abortSignal,
+        log: params.log,
+      });
+      return true;
+    } catch {
+      params.log?.(`[zulip] spinner: failed to add reaction "${name}"`);
+      return false;
+    }
+  };
+
+  const removeEmoji = async (name: string): Promise<void> => {
+    try {
+      await params.removeReaction({
+        auth: params.auth,
+        messageId: params.messageId,
+        emojiName: name,
+        abortSignal: params.abortSignal,
+      });
+    } catch {
+      params.log?.(`[zulip] spinner: failed to remove reaction "${name}"`);
+    }
+  };
+
+  const tick = async () => {
+    if (stopped) return;
+
+    const nextEmoji = params.emoji[currentIndex % params.emoji.length];
+    const prevEmoji = currentEmoji;
+
+    if (prevEmoji && prevEmoji !== nextEmoji) {
+      await removeEmoji(prevEmoji);
+    }
+
+    if (stopped) return;
+
+    const added = await addEmoji(nextEmoji);
+    if (added) {
+      currentEmoji = nextEmoji;
+    }
+
+    currentIndex++;
+  };
+
+  const queueTick = () => {
+    tickChain = tickChain.then(() => tick());
+  };
+
+  queueTick();
+
+  timer = setInterval(() => {
+    queueTick();
+  }, params.intervalMs);
+
+  return async () => {
+    if (stopped) return;
+    stopped = true;
+    if (timer) {
+      clearInterval(timer);
+      timer = undefined;
+    }
+    await tickChain;
+    if (currentEmoji) {
+      await removeEmoji(currentEmoji);
+      currentEmoji = undefined;
+    }
+  };
+}
+
 export function createBestEffortShutdownNoticeSender(params: {
   sendNotice: () => Promise<void>;
   log?: (message: string) => void;
@@ -1839,6 +1944,20 @@ export async function monitorZulipProvider(
             },
           });
 
+      const stopSpinner =
+        isDM || !account.processingSpinner.enabled
+          ? async () => {}
+          : startProcessingSpinner({
+              auth,
+              messageId: msg.id,
+              emoji: account.processingSpinner.emoji,
+              intervalMs: account.processingSpinner.intervalMs,
+              addReaction: addZulipReaction,
+              removeReaction: removeZulipReaction,
+              abortSignal: deliverySignal,
+              log: (m) => logger.debug?.(m),
+            });
+
       let ok = false;
       let lastDispatchError: unknown;
       const MAX_DISPATCH_RETRIES = 2;
@@ -1906,6 +2025,7 @@ export async function monitorZulipProvider(
           }
           // Clean up periodic keepalive timers.
           stopKeepalive();
+          await stopSpinner();
           if (keepaliveMessageId) {
             await deleteZulipMessage({
               auth,
