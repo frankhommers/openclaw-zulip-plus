@@ -155,4 +155,29 @@ describe("cleanupStaleStatusMessages", () => {
 
     expect(info).toHaveBeenCalledWith(expect.stringContaining("1"));
   });
+
+  it("falls back to editing message when delete fails", async () => {
+    const messages = [
+      makeMessage(50, `${ZULIP_KEEPALIVE_PREFIX} (30s elapsed, last activity 10:00:00)`),
+    ];
+
+    const fetchMessages = vi.fn().mockResolvedValue(messages);
+    const deleteMessage = vi.fn().mockRejectedValue(new Error("time limit expired"));
+    const editMessage = vi.fn().mockResolvedValue(undefined);
+    const info = vi.fn();
+
+    await cleanupStaleStatusMessages({
+      auth: AUTH,
+      streams: ["general"],
+      fetchMessages,
+      deleteMessage,
+      editMessage,
+      maxPerStream: 500,
+      logger: { info, warn: vi.fn(), debug: vi.fn() },
+    });
+
+    expect(deleteMessage).toHaveBeenCalledTimes(1);
+    expect(editMessage).toHaveBeenCalledWith(50, "*(cleaned up)*");
+    expect(info).toHaveBeenCalledWith(expect.stringContaining("1"));
+  });
 });

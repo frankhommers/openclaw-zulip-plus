@@ -172,6 +172,7 @@ export async function cleanupStaleStatusMessages(params: {
     limit: number;
   }) => Promise<Array<{ id: number; content: string }>>;
   deleteMessage: (messageId: number) => Promise<void>;
+  editMessage?: (messageId: number, content: string) => Promise<void>;
   maxPerStream?: number;
   logger: {
     info: (msg: string) => void;
@@ -212,10 +213,25 @@ export async function cleanupStaleStatusMessages(params: {
         params.logger.debug?.(
           `[zulip] stale status cleanup: deleted message ${msg.id} in stream "${stream}"`,
         );
-      } catch (err) {
-        params.logger.warn(
-          `[zulip] stale status cleanup: failed to delete message ${msg.id} in stream "${stream}": ${err instanceof Error ? err.message : String(err)}`,
-        );
+      } catch (deleteErr) {
+        // Delete failed (e.g. time limit expired) — fall back to editing the message to clear it.
+        if (params.editMessage) {
+          try {
+            await params.editMessage(msg.id, "*(cleaned up)*");
+            totalDeleted++;
+            params.logger.debug?.(
+              `[zulip] stale status cleanup: edited message ${msg.id} in stream "${stream}" (delete failed, used edit fallback)`,
+            );
+          } catch (editErr) {
+            params.logger.warn(
+              `[zulip] stale status cleanup: failed to delete/edit message ${msg.id} in stream "${stream}": delete: ${deleteErr instanceof Error ? deleteErr.message : String(deleteErr)}, edit: ${editErr instanceof Error ? editErr.message : String(editErr)}`,
+            );
+          }
+        } else {
+          params.logger.warn(
+            `[zulip] stale status cleanup: failed to delete message ${msg.id} in stream "${stream}": ${deleteErr instanceof Error ? deleteErr.message : String(deleteErr)}`,
+          );
+        }
       }
     }
   }
@@ -1346,6 +1362,10 @@ export async function monitorZulipProvider(
 
     const deleteBotMessage = async (messageId: number): Promise<void> => {
       await deleteZulipMessage({ auth, messageId, abortSignal });
+    };
+
+    const editBotMessage = async (messageId: number, content: string): Promise<void> => {
+      await editZulipStreamMessage({ auth, messageId, content, abortSignal });
     };
 
     // Dedupe cache prevents reprocessing messages after queue re-registration or reconnect.
@@ -2646,6 +2666,7 @@ export async function monitorZulipProvider(
         streams: streamsToClean,
         fetchMessages: fetchBotMessagesForStream,
         deleteMessage: deleteBotMessage,
+        editMessage: editBotMessage,
         maxPerStream: 500,
         logger,
       });
