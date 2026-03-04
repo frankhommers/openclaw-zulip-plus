@@ -1301,6 +1301,40 @@ export async function monitorZulipProvider(
     const botDisplayName = me.full_name?.trim() || "Agent";
     logger.warn(`[zulip-debug][${account.accountId}] bot user_id=${botUserId}`);
 
+    const fetchBotMessagesForStream = async (opts: {
+      stream: string;
+      senderEmail: string;
+      limit: number;
+    }): Promise<Array<{ id: number; content: string }>> => {
+      const narrow = JSON.stringify([
+        { operator: "sender", operand: opts.senderEmail },
+        { operator: "stream", operand: opts.stream },
+      ]);
+      const res = await zulipRequest<{
+        result: "success" | "error";
+        messages?: Array<{ id: number; content: string }>;
+      }>({
+        auth,
+        method: "GET",
+        path: "/api/v1/messages",
+        query: {
+          anchor: "newest",
+          num_before: String(opts.limit),
+          num_after: "0",
+          narrow,
+        },
+        abortSignal,
+      });
+      if (res.result !== "success") {
+        return [];
+      }
+      return res.messages ?? [];
+    };
+
+    const deleteBotMessage = async (messageId: number): Promise<void> => {
+      await deleteZulipMessage({ auth, messageId, abortSignal });
+    };
+
     // Dedupe cache prevents reprocessing messages after queue re-registration or reconnect.
     const dedupe = createDedupeCache({ ttlMs: 5 * 60 * 1000, maxSize: 500 });
     const oncharEnabled = account.chatmode === "onchar";
@@ -2588,6 +2622,21 @@ export async function monitorZulipProvider(
     };
 
     await replayPendingCheckpoints();
+
+    // Clean up stale status messages from previous session.
+    {
+      const streamsToClean = isSubscribedMode(account.streams)
+        ? await fetchSubscribedStreams({ auth, abortSignal })
+        : account.streams;
+      await cleanupStaleStatusMessages({
+        auth,
+        streams: streamsToClean,
+        fetchMessages: fetchBotMessagesForStream,
+        deleteMessage: deleteBotMessage,
+        maxPerStream: 50,
+        logger,
+      });
+    }
 
     if (!isSubscribedMode(account.streams)) {
       const plan = buildZulipQueuePlan(account.streams);
