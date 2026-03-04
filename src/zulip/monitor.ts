@@ -1331,6 +1331,7 @@ export async function monitorZulipProvider(
           num_before: String(opts.limit),
           num_after: "0",
           narrow,
+          apply_markdown: false,
         },
         abortSignal,
       });
