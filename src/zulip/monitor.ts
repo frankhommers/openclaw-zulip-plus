@@ -147,7 +147,10 @@ type ZulipMeResponse = {
 export const DEFAULT_DISPATCH_WAIT_FOR_IDLE_TIMEOUT_MS = 30_000;
 export const KEEPALIVE_INITIAL_DELAY_MS = 10_000;
 export const KEEPALIVE_REPEAT_INTERVAL_MS = 10_000;
-export const ZULIP_RECOVERY_NOTICE = "🔄 Gateway restarted - resuming the previous task now...";
+export const ZULIP_SHUTDOWN_NOTICE_PREFIX = "♻️ Gateway restart in progress";
+export const ZULIP_KEEPALIVE_PREFIX = "🔧 Still working...";
+export const ZULIP_RECOVERY_PREFIX = "🔄 Gateway restarted";
+export const ZULIP_RECOVERY_NOTICE = `${ZULIP_RECOVERY_PREFIX} - resuming the previous task now...`;
 const DEFAULT_ONCHAR_PREFIXES = [">", "!"];
 
 function formatKeepaliveElapsed(elapsedMs: number): string {
@@ -200,7 +203,7 @@ export function buildKeepaliveMessageContent(
   timeZone?: string,
 ): string {
   const timestamp = formatClockHmsInTimeZone(lastActivityAtMs, timeZone);
-  return `🔧 Still working... (${formatKeepaliveElapsed(elapsedMs)} elapsed, last activity ${timestamp})`;
+  return `${ZULIP_KEEPALIVE_PREFIX} (${formatKeepaliveElapsed(elapsedMs)} elapsed, last activity ${timestamp})`;
 }
 
 export function startPeriodicKeepalive(params: {
@@ -1352,7 +1355,7 @@ export async function monitorZulipProvider(
                   stream,
                   topic,
                   content:
-                    "♻️ Gateway restart in progress - reconnecting now. If this turn is interrupted, please resend in a moment.",
+                    `${ZULIP_SHUTDOWN_NOTICE_PREFIX} - reconnecting now. If this turn is interrupted, please resend in a moment.`,
                   abortSignal: deliverySignal,
                 });
               },
