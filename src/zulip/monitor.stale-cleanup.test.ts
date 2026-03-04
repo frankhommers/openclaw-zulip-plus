@@ -30,17 +30,17 @@ describe("cleanupStaleStatusMessages", () => {
       streams: ["general", "engineering"],
       fetchMessages,
       deleteMessage,
-      maxPerStream: 50,
+      maxPerStream: 500,
       logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
     });
 
     // Should fetch for both streams
     expect(fetchMessages).toHaveBeenCalledTimes(2);
     expect(fetchMessages).toHaveBeenCalledWith(
-      expect.objectContaining({ stream: "general", senderEmail: AUTH.email, limit: 50 }),
+      expect.objectContaining({ stream: "general", senderEmail: AUTH.email, limit: 500 }),
     );
     expect(fetchMessages).toHaveBeenCalledWith(
-      expect.objectContaining({ stream: "engineering", senderEmail: AUTH.email, limit: 50 }),
+      expect.objectContaining({ stream: "engineering", senderEmail: AUTH.email, limit: 500 }),
     );
 
     // Should delete 3 matching messages × 2 streams = 6
@@ -61,7 +61,7 @@ describe("cleanupStaleStatusMessages", () => {
       streams: ["general"],
       fetchMessages,
       deleteMessage,
-      maxPerStream: 50,
+      maxPerStream: 500,
       logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
     });
 
@@ -84,7 +84,7 @@ describe("cleanupStaleStatusMessages", () => {
       streams: ["broken-stream", "good-stream"],
       fetchMessages,
       deleteMessage,
-      maxPerStream: 50,
+      maxPerStream: 500,
       logger: { info: vi.fn(), warn, debug: vi.fn() },
     });
 
@@ -110,7 +110,7 @@ describe("cleanupStaleStatusMessages", () => {
       streams: ["general"],
       fetchMessages,
       deleteMessage,
-      maxPerStream: 50,
+      maxPerStream: 500,
       logger: { info: vi.fn(), warn, debug: vi.fn() },
     });
 
@@ -127,7 +127,7 @@ describe("cleanupStaleStatusMessages", () => {
       streams: [],
       fetchMessages,
       deleteMessage,
-      maxPerStream: 50,
+      maxPerStream: 500,
       logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
     });
 
@@ -149,7 +149,7 @@ describe("cleanupStaleStatusMessages", () => {
       streams: ["general"],
       fetchMessages,
       deleteMessage,
-      maxPerStream: 50,
+      maxPerStream: 500,
       logger: { info, warn: vi.fn(), debug: vi.fn() },
     });
 

@@ -179,7 +179,7 @@ export async function cleanupStaleStatusMessages(params: {
     debug?: (msg: string) => void;
   };
 }): Promise<void> {
-  const maxPerStream = params.maxPerStream ?? 50;
+  const maxPerStream = params.maxPerStream ?? 500;
   let totalDeleted = 0;
 
   params.logger.info(
@@ -2646,7 +2646,7 @@ export async function monitorZulipProvider(
         streams: streamsToClean,
         fetchMessages: fetchBotMessagesForStream,
         deleteMessage: deleteBotMessage,
-        maxPerStream: 50,
+        maxPerStream: 500,
         logger,
       });
     }
