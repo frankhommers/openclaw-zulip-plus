@@ -151,11 +151,18 @@ export const ZULIP_SHUTDOWN_NOTICE_PREFIX = "♻️ Gateway restart in progress"
 export const ZULIP_KEEPALIVE_PREFIX = "🔧 Still working...";
 export const ZULIP_RECOVERY_PREFIX = "🔄 Gateway restarted";
 export const ZULIP_RECOVERY_NOTICE = `${ZULIP_RECOVERY_PREFIX} - resuming the previous task now...`;
+export const ZULIP_ERROR_PREFIX = "⚠️ Zulip plugin ran into an error";
+export const ZULIP_UNKNOWN_ERROR_PREFIX = "⚠️ Gateway ran into an unknown error";
+
+/** Bare "Unknown error" text from the gateway, before we decorate it. */
+const BARE_UNKNOWN_ERROR = "Unknown error";
 
 const STALE_STATUS_PREFIXES = [
   ZULIP_KEEPALIVE_PREFIX,
   ZULIP_SHUTDOWN_NOTICE_PREFIX,
   ZULIP_RECOVERY_PREFIX,
+  ZULIP_ERROR_PREFIX,
+  ZULIP_UNKNOWN_ERROR_PREFIX,
 ];
 
 export function isStaleStatusMessage(content: string): boolean {
@@ -1850,6 +1857,12 @@ export async function monitorZulipProvider(
           humanDelay: core.channel.reply.resolveHumanDelayConfig(cfg, route.agentId),
           deliver: async (payload: ReplyPayload, info?: { kind: string }) => {
             const kind = info?.kind;
+
+            // Decorate bare "Unknown error" messages from the gateway with an emoji
+            // so they are visually distinct and match the stale cleanup prefix.
+            if (payload.text?.trim() === BARE_UNKNOWN_ERROR) {
+              payload = { ...payload, text: `${ZULIP_UNKNOWN_ERROR_PREFIX}` };
+            }
             // Batch tool result summaries into a single message that gets edited.
             // Only batch text-only tool payloads; media payloads go through normally.
             const hasMedia = Boolean(payload.mediaUrl) || (payload.mediaUrls?.length ?? 0) > 0;
@@ -2057,7 +2070,7 @@ export async function monitorZulipProvider(
           if (ok === false) {
             try {
               const failureMessage =
-                "⚠️ I ran into an error processing your message — please try again. (Error has been logged)";
+                `${ZULIP_ERROR_PREFIX} — please try again. (Error has been logged)`;
               if (isDM) {
                 await sendZulipDirectMessage({
                   auth,

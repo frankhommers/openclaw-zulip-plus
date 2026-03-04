@@ -4,6 +4,8 @@ import {
   ZULIP_KEEPALIVE_PREFIX,
   ZULIP_SHUTDOWN_NOTICE_PREFIX,
   ZULIP_RECOVERY_PREFIX,
+  ZULIP_ERROR_PREFIX,
+  ZULIP_UNKNOWN_ERROR_PREFIX,
 } from "./monitor.js";
 
 // Minimal ZulipAuth shape
@@ -14,12 +16,14 @@ function makeMessage(id: number, content: string, senderEmail = AUTH.email) {
 }
 
 describe("cleanupStaleStatusMessages", () => {
-  it("deletes messages matching all three status prefixes", async () => {
+  it("deletes messages matching all five status prefixes", async () => {
     const messages = [
       makeMessage(1, `${ZULIP_KEEPALIVE_PREFIX} (42s elapsed, last activity 14:23:10)`),
       makeMessage(2, `${ZULIP_SHUTDOWN_NOTICE_PREFIX} - reconnecting now.`),
       makeMessage(3, `${ZULIP_RECOVERY_PREFIX} - resuming the previous task now...`),
       makeMessage(4, "Hello, this is a normal user message"),
+      makeMessage(5, `${ZULIP_ERROR_PREFIX} — please try again. (Error has been logged)`),
+      makeMessage(6, `${ZULIP_UNKNOWN_ERROR_PREFIX}`),
     ];
 
     const fetchMessages = vi.fn().mockResolvedValue(messages);
@@ -43,8 +47,8 @@ describe("cleanupStaleStatusMessages", () => {
       expect.objectContaining({ stream: "engineering", senderEmail: AUTH.email, limit: 500 }),
     );
 
-    // Should delete 3 matching messages × 2 streams = 6
-    expect(deleteMessage).toHaveBeenCalledTimes(6);
+    // Should delete 5 matching messages × 2 streams = 10
+    expect(deleteMessage).toHaveBeenCalledTimes(10);
   });
 
   it("skips messages that do not match any status prefix", async () => {
