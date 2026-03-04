@@ -217,15 +217,25 @@ export async function cleanupStaleStatusMessages(params: {
         // Delete failed (e.g. time limit expired) — fall back to editing the message to clear it.
         if (params.editMessage) {
           try {
-            await params.editMessage(msg.id, "*(cleaned up)*");
+            // Try empty-ish content first; Zulip may reject it.
+            await params.editMessage(msg.id, " ");
             totalDeleted++;
             params.logger.debug?.(
               `[zulip] stale status cleanup: edited message ${msg.id} in stream "${stream}" (delete failed, used edit fallback)`,
             );
-          } catch (editErr) {
-            params.logger.warn(
-              `[zulip] stale status cleanup: failed to delete/edit message ${msg.id} in stream "${stream}": delete: ${deleteErr instanceof Error ? deleteErr.message : String(deleteErr)}, edit: ${editErr instanceof Error ? editErr.message : String(editErr)}`,
-            );
+          } catch {
+            try {
+              // Zulip rejected empty content — use minimal visible fallback.
+              await params.editMessage(msg.id, "-");
+              totalDeleted++;
+              params.logger.debug?.(
+                `[zulip] stale status cleanup: edited message ${msg.id} in stream "${stream}" (delete failed, used edit fallback with "-")`,
+              );
+            } catch (editErr) {
+              params.logger.warn(
+                `[zulip] stale status cleanup: failed to delete/edit message ${msg.id} in stream "${stream}": delete: ${deleteErr instanceof Error ? deleteErr.message : String(deleteErr)}, edit: ${editErr instanceof Error ? editErr.message : String(editErr)}`,
+              );
+            }
           }
         } else {
           params.logger.warn(
