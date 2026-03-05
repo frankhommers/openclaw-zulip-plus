@@ -59,7 +59,7 @@ This plugin is a merge of the best features from multiple independent Zulip impl
 ### From GitHub (clone + local install)
 
 ```bash
-git clone https://github.com/frankhommers/openclaw-zulip-plus.git
+git clone --recurse-submodules https://github.com/frankhommers/openclaw-zulip-plus.git
 openclaw plugins install ./openclaw-zulip-plus
 ```
 
@@ -109,7 +109,7 @@ When `streams` includes `"{subscribed}"`, the plugin auto-discovers channels via
 ## Development
 
 ```bash
-git clone https://github.com/frankhommers/openclaw-zulip-plus.git
+git clone --recurse-submodules https://github.com/frankhommers/openclaw-zulip-plus.git
 cd openclaw-zulip-plus
 npm install
 npm run typecheck   # tsc --noEmit
@@ -120,14 +120,16 @@ npm test            # vitest run (110 tests)
 
 This plugin merges work from multiple independent Zulip/OpenClaw implementations. Credit to all original authors:
 
-| Repository | Author | Key Contributions | Last synced commit |
+| Repository | Author | Key Contributions |
 |---|---|---|
-| [jamie-dit/zulipclaw](https://github.com/jamie-dit/zulipclaw) | Jamie Le | Reaction workflow state machine, in-flight checkpoints, topic rename tracking, tool progress accumulator, concurrency limits, keepalive messages, reaction buttons, 63+ tests. Used as the base for the merge. | `ce1f8f3` (2026-02-24) |
-| [FtlC-ian/openclaw-channel-zulip](https://github.com/FtlC-ian/openclaw-channel-zulip) | Debbie (FtlC-ian) | Typed Zulip SDK client (30+ API wrappers), 13+ action types, DM policies, chat modes, group/stream policies, admin action gating, block streaming, SSRF-safe probe, onboarding wizard. | `0ff2c7d` (2026-02-28) |
-| [rafaelreis-r/openclaw-zulip](https://github.com/rafaelreis-r/openclaw-zulip) | Rafael Reis | Standalone plugin extraction from jamie-dit's monorepo, initial packaging for npm distribution. | `fba0391` (2026-02-21) |
-| [tasshin/zulip-openclaw](https://github.com/tasshin/zulip-openclaw) | Tasshin Fogleman, Ember | Independent JavaScript implementation, persona/agent routing, context injection. Reviewed during audit. | `ac943e3` (2026-02-02) |
-| [tobiaswaggoner/openclaw-plugin-zulip](https://github.com/tobiaswaggoner/openclaw-plugin-zulip) | Tobias Waggoner | Independent TypeScript implementation, DM policy patterns. Reviewed during audit. | `23e6809` (2026-02-18) |
-| [xy-host/openclaw-zulip-plugin](https://github.com/xy-host/openclaw-zulip-plugin) | xy-host | Independent implementation, agent skill file patterns, block streaming approach. Reviewed during audit. | `eb5bec2` (2026-02-27) |
+| [jamie-dit/zulipclaw](https://github.com/jamie-dit/zulipclaw) | Jamie Le | Reaction workflow state machine, in-flight checkpoints, topic rename tracking, tool progress accumulator, concurrency limits, keepalive messages, reaction buttons, 63+ tests. Used as the base for the merge. |
+| [FtlC-ian/openclaw-channel-zulip](https://github.com/FtlC-ian/openclaw-channel-zulip) | Debbie (FtlC-ian) | Typed Zulip SDK client (30+ API wrappers), 13+ action types, DM policies, chat modes, group/stream policies, admin action gating, block streaming, SSRF-safe probe, onboarding wizard. |
+| [rafaelreis-r/openclaw-zulip](https://github.com/rafaelreis-r/openclaw-zulip) | Rafael Reis | Standalone plugin extraction from jamie-dit's monorepo, initial packaging for npm distribution. |
+| [tasshin/zulip-openclaw](https://github.com/tasshin/zulip-openclaw) | Tasshin Fogleman, Ember | Independent JavaScript implementation, persona/agent routing, context injection. Reviewed during audit. |
+| [tobiaswaggoner/openclaw-plugin-zulip](https://github.com/tobiaswaggoner/openclaw-plugin-zulip) | Tobias Waggoner | Independent TypeScript implementation, DM policy patterns. Reviewed during audit. |
+| [xy-host/openclaw-zulip-plugin](https://github.com/xy-host/openclaw-zulip-plugin) | xy-host | Independent implementation, agent skill file patterns, block streaming approach. Reviewed during audit. |
+
+All 6 upstream repos are included as git submodules in the `upstream/` directory. The pinned commit in each submodule is the last version that was reviewed/merged into this plugin. Run `git submodule status` to see the exact SHAs, or `git submodule update --remote` to pull their latest.
 
 Built on top of the [OpenClaw](https://github.com/openclaw/openclaw) platform.
 

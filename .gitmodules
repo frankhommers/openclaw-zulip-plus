@@ -1,0 +1,18 @@
+[submodule "upstream/tasshin"]
+	path = upstream/tasshin
+	url = https://github.com/tasshin/zulip-openclaw.git
+[submodule "upstream/rafaelreis"]
+	path = upstream/rafaelreis
+	url = https://github.com/rafaelreis-r/openclaw-zulip.git
+[submodule "upstream/ftlcian"]
+	path = upstream/ftlcian
+	url = https://github.com/FtlC-ian/openclaw-channel-zulip.git
+[submodule "upstream/jamie"]
+	path = upstream/jamie
+	url = https://github.com/jamie-dit/zulipclaw.git
+[submodule "upstream/tobias"]
+	path = upstream/tobias
+	url = https://github.com/tobiaswaggoner/openclaw-plugin-zulip.git
+[submodule "upstream/xyhost"]
+	path = upstream/xyhost
+	url = https://github.com/xy-host/openclaw-zulip-plugin.git

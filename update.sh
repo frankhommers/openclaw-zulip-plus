@@ -16,7 +16,7 @@ if ! command -v openclaw >/dev/null 2>&1; then
 fi
 
 echo "[update] Pulling latest changes..."
-git pull --ff-only
+git pull --ff-only --recurse-submodules
 
 if command -v bun >/dev/null 2>&1; then
   echo "[update] Installing runtime dependencies with bun..."
