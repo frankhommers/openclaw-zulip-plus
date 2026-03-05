@@ -74,6 +74,7 @@ type ZulipEventMessage = {
   content?: string;
   content_type?: string;
   timestamp?: number;
+  reactions?: Array<{ emoji_name: string; user_id: number }>;
 };
 
 type ZulipReactionEvent = {
@@ -1045,6 +1046,81 @@ function shouldIgnoreMessage(params: {
   return { ignore: false };
 }
 
+/**
+ * Check whether the bot has already handled a message, using two signals:
+ *
+ * 1. **Reaction check**: Does the trigger message already have the bot's
+ *    success or failure reaction? If so, the bot completed processing in a
+ *    prior session. This works for messages fetched via REST (which include
+ *    the `reactions` array). For real-time event messages (which typically
+ *    omit reactions), we fetch the single message from the API.
+ *
+ * 2. **Last-sender check**: Is the most recent message in the topic from the
+ *    bot itself? If the bot already replied, re-dispatching would produce a
+ *    duplicate response.
+ *
+ * Both checks are best-effort: if the API call fails, we allow processing to
+ * continue (false negative is better than dropping a legitimate message).
+ */
+export async function isBotAlreadyHandled(params: {
+  message: ZulipEventMessage;
+  botUserId: number;
+  successEmoji: string;
+  failureEmoji: string;
+  stream: string;
+  topic: string;
+  fetchMessage: (messageId: number) => Promise<{
+    reactions?: Array<{ emoji_name: string; user_id: number }>;
+  } | undefined>;
+  fetchNewestInTopic: (stream: string, topic: string) => Promise<{
+    sender_id: number;
+    id: number;
+  } | undefined>;
+  log?: (message: string) => void;
+}): Promise<{ handled: boolean; reason?: string }> {
+  const { message, botUserId, successEmoji, failureEmoji, stream, topic, fetchMessage, fetchNewestInTopic, log } =
+    params;
+
+  // --- Check 1: Bot already has a completion reaction on the trigger message ---
+  let reactions = message.reactions;
+  if (!reactions) {
+    // Real-time events don't carry reactions; fetch the message to check.
+    try {
+      const fetched = await fetchMessage(message.id);
+      if (fetched) {
+        reactions = fetched.reactions;
+      }
+    } catch {
+      // Best effort — if fetch fails, skip this check.
+    }
+  }
+  if (reactions) {
+    const completionEmoji = [successEmoji, failureEmoji];
+    const botHasCompletion = reactions.some(
+      (r) => r.user_id === botUserId && completionEmoji.includes(r.emoji_name),
+    );
+    if (botHasCompletion) {
+      log?.(`[zulip] skipping message ${message.id}: bot already has completion reaction`);
+      return { handled: true, reason: "bot-completion-reaction" };
+    }
+  }
+
+  // --- Check 2: Bot was the last sender in the topic ---
+  if (stream && topic) {
+    try {
+      const lastMsg = await fetchNewestInTopic(stream, topic);
+      if (lastMsg && lastMsg.sender_id === botUserId) {
+        log?.(`[zulip] skipping message ${message.id}: bot was last sender in ${stream}#${topic} (msg ${lastMsg.id})`);
+        return { handled: true, reason: "bot-was-last-sender" };
+      }
+    } catch {
+      // Best effort — if fetch fails, allow processing.
+    }
+  }
+
+  return { handled: false };
+}
+
 async function sendZulipDirectMessage(params: {
   auth: ZulipAuth;
   recipientId: number;
@@ -1664,6 +1740,52 @@ export async function monitorZulipProvider(
           if (!groupAllowed) {
             return;
           }
+        }
+      }
+      // Guard: skip messages the bot already handled in a previous session.
+      // This prevents duplicate responses after gateway restarts, checkpoint
+      // recovery, re-registration catchup, or freshness checker re-dispatch.
+      // Checks: (1) bot already has success/failure reaction on the trigger
+      // message, (2) bot was the last sender in the topic.
+      if (!isDM) {
+        const alreadyHandled = await isBotAlreadyHandled({
+          message: msg,
+          botUserId,
+          successEmoji: account.reactions.onSuccess,
+          failureEmoji: account.reactions.onFailure,
+          stream,
+          topic,
+          fetchMessage: async (messageId) => {
+            const res = await zulipRequest<{
+              result: string;
+              message?: { reactions?: Array<{ emoji_name: string; user_id: number }> };
+            }>({ auth, method: "GET", path: `/api/v1/messages/${messageId}`, query: { apply_markdown: "false" }, abortSignal });
+            return res.result === "success" ? res.message : undefined;
+          },
+          fetchNewestInTopic: async (s, t) => {
+            const res = await zulipRequest<{
+              result: string;
+              messages?: Array<{ sender_id: number; id: number }>;
+            }>({
+              auth, method: "GET", path: "/api/v1/messages",
+              query: { anchor: "newest", num_before: "1", num_after: "0", narrow: JSON.stringify([["stream", s], ["topic", t]]), apply_markdown: "false" },
+              abortSignal,
+            });
+            return res.result === "success" && res.messages && res.messages.length > 0 ? res.messages[0] : undefined;
+          },
+          log: (m) => logger.debug?.(m),
+        });
+        if (alreadyHandled.handled) {
+          logger.info(
+            `[zulip:${account.accountId}] skipping already-handled message ${msg.id} in ${stream}#${topic} (${alreadyHandled.reason})`,
+          );
+          // If this was a recovery checkpoint, clear it since the work is done.
+          if (isRecovery && messageOptions?.recoveryCheckpoint) {
+            await clearZulipInFlightCheckpoint({
+              checkpointId: messageOptions.recoveryCheckpoint.checkpointId,
+            }).catch(() => undefined);
+          }
+          return;
         }
       }
       if (isRecovery) {
@@ -2647,7 +2769,34 @@ export async function monitorZulipProvider(
       // long-poll gaps, queue re-registrations, or silent connection drops.
       // Fetches the 5 most recent messages via REST and processes any with IDs
       // higher than the last one we saw through the event queue.
+      //
+      // Initialize lastSeenMsgId from the current newest message so the freshness
+      // checker doesn't re-dispatch old messages on startup.
       let lastSeenMsgId = 0;
+      try {
+        const seed = await zulipRequest<{ result: string; messages?: Array<{ id: number }> }>({
+          auth,
+          method: "GET",
+          path: "/api/v1/messages",
+          query: {
+            anchor: "newest",
+            num_before: "1",
+            num_after: "0",
+            narrow: JSON.stringify([["stream", stream]]),
+            apply_markdown: "false",
+          },
+          abortSignal: loopAbortSignal,
+        });
+        if (seed.result === "success" && seed.messages && seed.messages.length > 0) {
+          lastSeenMsgId = seed.messages[0].id;
+          logger.debug?.(
+            `[zulip:${account.accountId}] initialized lastSeenMsgId=${lastSeenMsgId} for stream "${stream}"`,
+          );
+        }
+      } catch {
+        // Best effort — if this fails, the guard in the freshness timer
+        // (lastSeenMsgId === 0) will prevent premature catchup.
+      }
       const FRESHNESS_INTERVAL_MS = 30_000;
       const freshnessTimer = setInterval(async () => {
         if (stopped || loopAbortSignal.aborted || lastSeenMsgId === 0) return;
