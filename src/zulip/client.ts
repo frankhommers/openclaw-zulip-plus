@@ -1067,4 +1067,1064 @@ export async function updateZulipRealm(client: ZulipClient, params: ZulipRealmUp
   assertSuccess(payload, "Zulip realm update failed");
 }
 
+export type ZulipScheduledMessage = {
+  scheduled_message_id: number;
+  type: "stream" | "private";
+  to: number | number[];
+  topic?: string;
+  content: string;
+  rendered_content: string;
+  scheduled_delivery_timestamp: number;
+  failed: boolean;
+};
+
+export type ZulipUserGroup = {
+  id: number;
+  name: string;
+  description: string;
+  members: number[];
+  is_system_group: boolean;
+};
+
+export type ZulipCustomEmoji = {
+  id: string;
+  name: string;
+  source_url: string;
+  deactivated: boolean;
+  author_id: number | null;
+};
+
+export type ZulipDraft = {
+  id: number;
+  type: "stream" | "private";
+  to: number[];
+  topic: string;
+  content: string;
+  timestamp: number;
+};
+
+export type ZulipLinkifier = {
+  id: number;
+  pattern: string;
+  url_template: string;
+};
+
+export type ZulipUserStatus = {
+  status_text?: string;
+  emoji_name?: string;
+  emoji_code?: string;
+  reaction_type?: string;
+};
+
+export type ZulipCustomProfileField = {
+  id: number;
+  name: string;
+  type: number;
+  hint: string;
+  order: number;
+  field_data?: string;
+  display_in_profile_summary?: boolean;
+};
+
+export type ZulipUserProfileData = Record<string, { value: string; rendered_value?: string }>;
+
+export type ZulipMessageFlag =
+  | "read"
+  | "starred"
+  | "collapsed"
+  | "mentioned"
+  | "wildcard_mentioned"
+  | "has_alert_word"
+  | "historical";
+
+export type ZulipMessageDetails = {
+  id: number;
+  sender_id: number;
+  sender_email: string;
+  sender_full_name: string;
+  type: "stream" | "private";
+  stream_id?: number;
+  display_recipient: string | Array<{ id: number; email: string; full_name: string }>;
+  subject: string;
+  content: string;
+  timestamp: number;
+  reactions: Array<{ emoji_name: string; user_id: number }>;
+  flags: string[];
+};
+
+export type ZulipGetMessagesResult = {
+  messages: ZulipMessageDetails[];
+  found_anchor: boolean;
+  found_oldest: boolean;
+  found_newest: boolean;
+};
+
+export type ZulipTopicVisibilityPolicy = 0 | 1 | 2 | 3;
+
+export const TOPIC_VISIBILITY_POLICIES: Record<string, ZulipTopicVisibilityPolicy> = {
+  none: 0,
+  muted: 1,
+  unmuted: 2,
+  followed: 3,
+};
+
+export const TOPIC_VISIBILITY_LABELS: Record<number, string> = {
+  0: "None",
+  1: "Muted",
+  2: "Unmuted",
+  3: "Followed",
+};
+
+export type ZulipMutedUser = {
+  id: number;
+  timestamp: number;
+};
+
+export type ZulipSubscriptionProperty = {
+  stream_id: number;
+  property: string;
+  value: unknown;
+};
+
+export type ZulipAttachment = {
+  id: number;
+  name: string;
+  size: number;
+  path_id: string;
+  create_time: number;
+  messages: Array<{ id: number; date_sent: number }>;
+};
+
+export type ZulipAttachmentsResult = {
+  attachments: ZulipAttachment[];
+  uploadSpaceUsed: number;
+};
+
+export type ZulipTopic = {
+  name: string;
+  max_id: number;
+};
+
+export type ZulipUserFull = {
+  user_id: number;
+  email: string;
+  full_name: string;
+  is_bot: boolean;
+  is_active: boolean;
+  role: number;
+  avatar_url?: string;
+  date_joined?: string;
+  timezone?: string;
+};
+
+export async function getZulipStreamTopics(
+  client: ZulipClient,
+  streamId: number,
+): Promise<ZulipTopic[]> {
+  const payload = await client.request<ZulipApiResponse & { topics?: ZulipTopic[] }>(
+    `/users/me/${streamId}/topics`,
+  );
+  assertSuccess(payload, "Zulip stream topics fetch failed");
+  return payload.topics ?? [];
+}
+
+export async function getZulipStreamMembers(
+  client: ZulipClient,
+  streamId: number,
+): Promise<number[]> {
+  const payload = await client.request<ZulipApiResponse & { subscribers?: number[] }>(
+    `/streams/${streamId}/members`,
+  );
+  assertSuccess(payload, "Zulip stream members fetch failed");
+  return payload.subscribers ?? [];
+}
+
+export async function unsubscribeZulipStream(client: ZulipClient, streamName: string): Promise<void> {
+  const body = new URLSearchParams();
+  body.set("subscriptions", JSON.stringify([streamName]));
+  const payload = await client.request<ZulipApiResponse>("/users/me/subscriptions", {
+    method: "DELETE",
+    body: body.toString(),
+  });
+  assertSuccess(payload, "Zulip stream unsubscribe failed");
+}
+
+export async function subscribeUsersToZulipStream(
+  client: ZulipClient,
+  params: {
+    name: string;
+    userIds: number[];
+    description?: string;
+    isPrivate?: boolean;
+  },
+): Promise<{ already_subscribed: Record<string, string[]>; subscribed: Record<string, string[]> }> {
+  const subscriptions = [
+    {
+      name: params.name,
+      ...(params.description !== undefined ? { description: params.description } : {}),
+      ...(params.isPrivate !== undefined ? { invite_only: params.isPrivate } : {}),
+    },
+  ];
+  const body = new URLSearchParams();
+  body.set("subscriptions", JSON.stringify(subscriptions));
+  body.set("principals", JSON.stringify(params.userIds));
+  const payload = await client.request<
+    ZulipApiResponse & {
+      already_subscribed?: Record<string, string[]>;
+      subscribed?: Record<string, string[]>;
+    }
+  >("/users/me/subscriptions", {
+    method: "POST",
+    body: body.toString(),
+  });
+  assertSuccess(payload, "Zulip stream user subscribe failed");
+  return {
+    already_subscribed: payload.already_subscribed ?? {},
+    subscribed: payload.subscribed ?? {},
+  };
+}
+
+export async function unsubscribeUsersFromZulipStream(
+  client: ZulipClient,
+  streamName: string,
+  userIds: number[],
+): Promise<void> {
+  const body = new URLSearchParams();
+  body.set("subscriptions", JSON.stringify([streamName]));
+  body.set("principals", JSON.stringify(userIds));
+  const payload = await client.request<ZulipApiResponse>("/users/me/subscriptions", {
+    method: "DELETE",
+    body: body.toString(),
+  });
+  assertSuccess(payload, "Zulip stream user unsubscribe failed");
+}
+
+export async function listZulipUsers(client: ZulipClient): Promise<ZulipUserFull[]> {
+  const payload = await client.request<ZulipApiResponse & { members?: ZulipUserFull[] }>("/users");
+  assertSuccess(payload, "Zulip users list failed");
+  return payload.members ?? [];
+}
+
+export async function getZulipUserByEmail(client: ZulipClient, email: string): Promise<ZulipUserFull> {
+  const payload = await client.request<ZulipApiResponse & { user?: ZulipUserFull }>(
+    `/users/${encodeURIComponent(email)}`,
+  );
+  assertSuccess(payload, "Zulip user fetch by email failed");
+  if (!payload.user) {
+    throw new Error("Zulip user fetch by email missing user");
+  }
+  return payload.user;
+}
+
+export async function getZulipSingleMessage(
+  client: ZulipClient,
+  messageId: number,
+): Promise<ZulipMessageDetails> {
+  const payload = await client.request<ZulipApiResponse & { message?: ZulipMessageDetails }>(
+    `/messages/${messageId}?apply_markdown=false`,
+  );
+  assertSuccess(payload, "Zulip single message fetch failed");
+  if (!payload.message) {
+    throw new Error("Zulip single message fetch missing message");
+  }
+  return payload.message;
+}
+
+export async function getZulipMessagesAdvanced(
+  client: ZulipClient,
+  params: {
+    anchor: number | string;
+    numBefore: number;
+    numAfter: number;
+    narrow?: Array<Record<string, unknown>>;
+    applyMarkdown?: boolean;
+    includeAnchor?: boolean;
+  },
+): Promise<ZulipGetMessagesResult> {
+  const qs = new URLSearchParams();
+  qs.set("anchor", String(params.anchor));
+  qs.set("num_before", String(params.numBefore));
+  qs.set("num_after", String(params.numAfter));
+  if (params.narrow) {
+    qs.set("narrow", JSON.stringify(params.narrow));
+  }
+  if (params.applyMarkdown !== undefined) {
+    qs.set("apply_markdown", String(params.applyMarkdown));
+  }
+  if (params.includeAnchor !== undefined) {
+    qs.set("include_anchor", String(params.includeAnchor));
+  }
+  const payload = await client.request<
+    ZulipApiResponse & {
+      messages?: ZulipMessageDetails[];
+      found_anchor?: boolean;
+      found_oldest?: boolean;
+      found_newest?: boolean;
+    }
+  >(`/messages?${qs.toString()}`);
+  assertSuccess(payload, "Zulip advanced messages fetch failed");
+  return {
+    messages: payload.messages ?? [],
+    found_anchor: payload.found_anchor ?? false,
+    found_oldest: payload.found_oldest ?? false,
+    found_newest: payload.found_newest ?? false,
+  };
+}
+
+export async function updateZulipMessageContent(
+  client: ZulipClient,
+  messageId: number,
+  params: {
+    content?: string;
+    topic?: string;
+    propagateMode?: "change_one" | "change_later" | "change_all";
+  },
+): Promise<void> {
+  const body = new URLSearchParams();
+  if (params.content !== undefined) {
+    body.set("content", params.content);
+  }
+  if (params.topic !== undefined) {
+    body.set("topic", params.topic);
+  }
+  if (params.propagateMode !== undefined) {
+    body.set("propagate_mode", params.propagateMode);
+  }
+  if (Array.from(body.keys()).length === 0) {
+    throw new Error("No message content updates provided.");
+  }
+  const payload = await client.request<ZulipApiResponse>(`/messages/${messageId}`, {
+    method: "PATCH",
+    body: body.toString(),
+  });
+  assertSuccess(payload, "Zulip message content update failed");
+}
+
+export async function sendZulipApiMessage(
+  client: ZulipClient,
+  params: {
+    type: "stream" | "direct";
+    to: string;
+    topic?: string;
+    content: string;
+  },
+): Promise<{ id: number }> {
+  const body = new URLSearchParams();
+  body.set("type", params.type === "direct" ? "private" : "stream");
+  body.set("to", params.to);
+  if (params.topic !== undefined) {
+    body.set("topic", params.topic);
+  }
+  body.set("content", params.content);
+  const payload = await zulipClientRequestWithRetry<ZulipApiResponse & { id?: number }>(
+    client,
+    "/messages",
+    { method: "POST", body: body.toString() },
+  );
+  assertSuccess(payload, "Zulip API message send failed");
+  if (typeof payload.id !== "number") {
+    throw new Error("Zulip API message send missing id");
+  }
+  return { id: payload.id };
+}
+
+export async function listZulipScheduledMessages(
+  client: ZulipClient,
+): Promise<ZulipScheduledMessage[]> {
+  const payload = await client.request<ZulipApiResponse & { scheduled_messages?: ZulipScheduledMessage[] }>(
+    "/scheduled_messages",
+  );
+  assertSuccess(payload, "Zulip scheduled messages list failed");
+  return payload.scheduled_messages ?? [];
+}
+
+export async function createZulipScheduledMessage(
+  client: ZulipClient,
+  params: {
+    type: "stream" | "private";
+    to: string;
+    topic?: string;
+    content: string;
+    scheduledDeliveryTimestamp: number;
+  },
+): Promise<{ scheduled_message_id: number }> {
+  const body = new URLSearchParams();
+  body.set("type", params.type);
+  body.set("to", params.to);
+  if (params.topic !== undefined) {
+    body.set("topic", params.topic);
+  }
+  body.set("content", params.content);
+  body.set("scheduled_delivery_timestamp", String(params.scheduledDeliveryTimestamp));
+  const payload = await client.request<ZulipApiResponse & { scheduled_message_id?: number }>(
+    "/scheduled_messages",
+    { method: "POST", body: body.toString() },
+  );
+  assertSuccess(payload, "Zulip scheduled message create failed");
+  if (typeof payload.scheduled_message_id !== "number") {
+    throw new Error("Zulip scheduled message create missing scheduled_message_id");
+  }
+  return { scheduled_message_id: payload.scheduled_message_id };
+}
+
+export async function updateZulipScheduledMessage(
+  client: ZulipClient,
+  scheduledMessageId: number,
+  params: {
+    type?: "stream" | "private";
+    to?: string;
+    topic?: string;
+    content?: string;
+    scheduledDeliveryTimestamp?: number;
+  },
+): Promise<void> {
+  const body = new URLSearchParams();
+  if (params.type !== undefined) {
+    body.set("type", params.type);
+  }
+  if (params.to !== undefined) {
+    body.set("to", params.to);
+  }
+  if (params.topic !== undefined) {
+    body.set("topic", params.topic);
+  }
+  if (params.content !== undefined) {
+    body.set("content", params.content);
+  }
+  if (params.scheduledDeliveryTimestamp !== undefined) {
+    body.set("scheduled_delivery_timestamp", String(params.scheduledDeliveryTimestamp));
+  }
+  if (Array.from(body.keys()).length === 0) {
+    throw new Error("No scheduled message updates provided.");
+  }
+  const payload = await client.request<ZulipApiResponse>(`/scheduled_messages/${scheduledMessageId}`, {
+    method: "PATCH",
+    body: body.toString(),
+  });
+  assertSuccess(payload, "Zulip scheduled message update failed");
+}
+
+export async function deleteZulipScheduledMessage(
+  client: ZulipClient,
+  scheduledMessageId: number,
+): Promise<void> {
+  const payload = await client.request<ZulipApiResponse>(`/scheduled_messages/${scheduledMessageId}`, {
+    method: "DELETE",
+  });
+  assertSuccess(payload, "Zulip scheduled message delete failed");
+}
+
+export async function listZulipUserGroups(client: ZulipClient): Promise<ZulipUserGroup[]> {
+  const payload = await client.request<ZulipApiResponse & { user_groups?: ZulipUserGroup[] }>(
+    "/user_groups",
+  );
+  assertSuccess(payload, "Zulip user groups list failed");
+  return payload.user_groups ?? [];
+}
+
+export async function createZulipUserGroup(
+  client: ZulipClient,
+  params: {
+    name: string;
+    description?: string;
+    members: number[];
+  },
+): Promise<void> {
+  const body = new URLSearchParams();
+  body.set("name", params.name);
+  if (params.description !== undefined) {
+    body.set("description", params.description);
+  }
+  body.set("members", JSON.stringify(params.members));
+  const payload = await client.request<ZulipApiResponse>("/user_groups/create", {
+    method: "POST",
+    body: body.toString(),
+  });
+  assertSuccess(payload, "Zulip user group create failed");
+}
+
+export async function updateZulipUserGroup(
+  client: ZulipClient,
+  groupId: number,
+  params: {
+    name?: string;
+    description?: string;
+  },
+): Promise<void> {
+  const body = new URLSearchParams();
+  if (params.name !== undefined) {
+    body.set("name", params.name);
+  }
+  if (params.description !== undefined) {
+    body.set("description", params.description);
+  }
+  if (Array.from(body.keys()).length === 0) {
+    throw new Error("No user group updates provided.");
+  }
+  const payload = await client.request<ZulipApiResponse>(`/user_groups/${groupId}`, {
+    method: "PATCH",
+    body: body.toString(),
+  });
+  assertSuccess(payload, "Zulip user group update failed");
+}
+
+export async function deleteZulipUserGroup(client: ZulipClient, groupId: number): Promise<void> {
+  const payload = await client.request<ZulipApiResponse>(`/user_groups/${groupId}`, {
+    method: "DELETE",
+  });
+  assertSuccess(payload, "Zulip user group delete failed");
+}
+
+export async function getZulipUserGroupMembers(
+  client: ZulipClient,
+  groupId: number,
+): Promise<number[]> {
+  const payload = await client.request<ZulipApiResponse & { members?: number[] }>(
+    `/user_groups/${groupId}/members`,
+  );
+  assertSuccess(payload, "Zulip user group members fetch failed");
+  return payload.members ?? [];
+}
+
+export async function updateZulipUserGroupMembers(
+  client: ZulipClient,
+  groupId: number,
+  params: {
+    add?: number[];
+    remove?: number[];
+  },
+): Promise<void> {
+  const body = new URLSearchParams();
+  if (params.add !== undefined) {
+    body.set("add", JSON.stringify(params.add));
+  }
+  if (params.remove !== undefined) {
+    body.set("delete", JSON.stringify(params.remove));
+  }
+  if (Array.from(body.keys()).length === 0) {
+    throw new Error("No user group member updates provided.");
+  }
+  const payload = await client.request<ZulipApiResponse>(`/user_groups/${groupId}/members`, {
+    method: "POST",
+    body: body.toString(),
+  });
+  assertSuccess(payload, "Zulip user group members update failed");
+}
+
+export async function listZulipCustomEmoji(client: ZulipClient): Promise<ZulipCustomEmoji[]> {
+  const payload = await client.request<
+    ZulipApiResponse & {
+      emoji?: Record<
+        string,
+        {
+          name?: string;
+          source_url?: string;
+          deactivated?: boolean;
+          author_id?: number | null;
+        }
+      >;
+    }
+  >("/realm/emoji");
+  assertSuccess(payload, "Zulip custom emoji list failed");
+  return Object.entries(payload.emoji ?? {}).map(([id, emoji]) => ({
+    id,
+    name: emoji.name ?? id,
+    source_url: emoji.source_url ?? "",
+    deactivated: emoji.deactivated ?? false,
+    author_id: emoji.author_id ?? null,
+  }));
+}
+
+export async function uploadZulipCustomEmoji(
+  client: ZulipClient,
+  emojiName: string,
+  imageBuffer: Buffer,
+  fileName?: string,
+  contentType?: string,
+): Promise<void> {
+  const form = new FormData();
+  form.append(
+    "filename",
+    new Blob([imageBuffer], { type: contentType ?? "application/octet-stream" }),
+    fileName ?? `${emojiName}.bin`,
+  );
+  const payload = await zulipClientRequestWithRetry<ZulipApiResponse>(
+    client,
+    `/realm/emoji/${encodeURIComponent(emojiName)}`,
+    {
+      method: "POST",
+      body: form,
+    },
+  );
+  assertSuccess(payload, "Zulip custom emoji upload failed");
+}
+
+export async function deactivateZulipCustomEmoji(
+  client: ZulipClient,
+  emojiId: string,
+): Promise<void> {
+  const payload = await client.request<ZulipApiResponse>(`/realm/emoji/${encodeURIComponent(emojiId)}`, {
+    method: "DELETE",
+  });
+  assertSuccess(payload, "Zulip custom emoji deactivate failed");
+}
+
+export async function listZulipDrafts(client: ZulipClient): Promise<ZulipDraft[]> {
+  const payload = await client.request<ZulipApiResponse & { drafts?: ZulipDraft[] }>("/drafts");
+  assertSuccess(payload, "Zulip drafts list failed");
+  return payload.drafts ?? [];
+}
+
+export async function createZulipDraft(
+  client: ZulipClient,
+  params: {
+    type: "stream" | "private";
+    to: number[];
+    topic: string;
+    content: string;
+  },
+): Promise<number[]> {
+  const body = new URLSearchParams();
+  body.set(
+    "drafts",
+    JSON.stringify([
+      {
+        type: params.type,
+        to: JSON.stringify(params.to),
+        topic: params.topic,
+        content: params.content,
+      },
+    ]),
+  );
+  const payload = await client.request<ZulipApiResponse & { ids?: number[] }>("/drafts", {
+    method: "POST",
+    body: body.toString(),
+  });
+  assertSuccess(payload, "Zulip draft create failed");
+  return payload.ids ?? [];
+}
+
+export async function editZulipDraft(
+  client: ZulipClient,
+  draftId: number,
+  params: {
+    type?: "stream" | "private";
+    to?: number[];
+    topic?: string;
+    content?: string;
+  },
+): Promise<void> {
+  const body = new URLSearchParams();
+  if (params.type !== undefined) {
+    body.set("type", params.type);
+  }
+  if (params.to !== undefined) {
+    body.set("to", JSON.stringify(params.to));
+  }
+  if (params.topic !== undefined) {
+    body.set("topic", params.topic);
+  }
+  if (params.content !== undefined) {
+    body.set("content", params.content);
+  }
+  if (Array.from(body.keys()).length === 0) {
+    throw new Error("No draft updates provided.");
+  }
+  const payload = await client.request<ZulipApiResponse>(`/drafts/${draftId}`, {
+    method: "PATCH",
+    body: body.toString(),
+  });
+  assertSuccess(payload, "Zulip draft edit failed");
+}
+
+export async function deleteZulipDraft(client: ZulipClient, draftId: number): Promise<void> {
+  const payload = await client.request<ZulipApiResponse>(`/drafts/${draftId}`, { method: "DELETE" });
+  assertSuccess(payload, "Zulip draft delete failed");
+}
+
+export async function deleteZulipTopic(
+  client: ZulipClient,
+  streamId: number,
+  topicName: string,
+): Promise<{ complete: boolean }> {
+  const body = new URLSearchParams({ topic_name: topicName });
+  const payload = await client.request<ZulipApiResponse & { complete?: boolean }>(
+    `/streams/${streamId}/delete_topic`,
+    {
+      method: "POST",
+      body: body.toString(),
+    },
+  );
+  assertSuccess(payload, "Zulip topic delete failed");
+  return { complete: payload.complete ?? false };
+}
+
+export async function listZulipLinkifiers(client: ZulipClient): Promise<ZulipLinkifier[]> {
+  const payload = await client.request<ZulipApiResponse & { linkifiers?: ZulipLinkifier[] }>(
+    "/realm/linkifiers",
+  );
+  assertSuccess(payload, "Zulip linkifiers list failed");
+  return payload.linkifiers ?? [];
+}
+
+export async function addZulipLinkifier(
+  client: ZulipClient,
+  params: {
+    pattern: string;
+    url_template: string;
+  },
+): Promise<{ id: number }> {
+  const body = new URLSearchParams({
+    pattern: params.pattern,
+    url_template: params.url_template,
+  });
+  const payload = await client.request<ZulipApiResponse & { id?: number }>("/realm/filters", {
+    method: "POST",
+    body: body.toString(),
+  });
+  assertSuccess(payload, "Zulip linkifier add failed");
+  if (typeof payload.id !== "number") {
+    throw new Error("Zulip linkifier add missing id");
+  }
+  return { id: payload.id };
+}
+
+export async function updateZulipLinkifier(
+  client: ZulipClient,
+  filterId: number,
+  params: {
+    pattern?: string;
+    url_template?: string;
+  },
+): Promise<void> {
+  const body = new URLSearchParams();
+  if (params.pattern !== undefined) {
+    body.set("pattern", params.pattern);
+  }
+  if (params.url_template !== undefined) {
+    body.set("url_template", params.url_template);
+  }
+  if (Array.from(body.keys()).length === 0) {
+    throw new Error("No linkifier updates provided.");
+  }
+  const payload = await client.request<ZulipApiResponse>(`/realm/filters/${filterId}`, {
+    method: "PATCH",
+    body: body.toString(),
+  });
+  assertSuccess(payload, "Zulip linkifier update failed");
+}
+
+export async function removeZulipLinkifier(client: ZulipClient, filterId: number): Promise<void> {
+  const payload = await client.request<ZulipApiResponse>(`/realm/filters/${filterId}`, {
+    method: "DELETE",
+  });
+  assertSuccess(payload, "Zulip linkifier remove failed");
+}
+
+export async function reorderZulipLinkifiers(
+  client: ZulipClient,
+  orderedIds: number[],
+): Promise<void> {
+  const body = new URLSearchParams({
+    ordered_linkifier_ids: JSON.stringify(orderedIds),
+  });
+  const payload = await client.request<ZulipApiResponse>("/realm/linkifiers", {
+    method: "PATCH",
+    body: body.toString(),
+  });
+  assertSuccess(payload, "Zulip linkifier reorder failed");
+}
+
+export async function getZulipUserStatus(
+  client: ZulipClient,
+  userId: number,
+): Promise<ZulipUserStatus> {
+  const payload = await client.request<
+    ZulipApiResponse & {
+      status_text?: string;
+      emoji_name?: string;
+      emoji_code?: string;
+      reaction_type?: string;
+    }
+  >(`/users/${userId}/status`);
+  assertSuccess(payload, "Zulip user status fetch failed");
+  return {
+    status_text: payload.status_text,
+    emoji_name: payload.emoji_name,
+    emoji_code: payload.emoji_code,
+    reaction_type: payload.reaction_type,
+  };
+}
+
+export async function updateZulipOwnStatus(
+  client: ZulipClient,
+  params: ZulipUserStatus & { away?: boolean },
+): Promise<void> {
+  const body = new URLSearchParams();
+  if (params.status_text !== undefined) {
+    body.set("status_text", params.status_text);
+  }
+  if (params.emoji_name !== undefined) {
+    body.set("emoji_name", params.emoji_name);
+  }
+  if (params.emoji_code !== undefined) {
+    body.set("emoji_code", params.emoji_code);
+  }
+  if (params.reaction_type !== undefined) {
+    body.set("reaction_type", params.reaction_type);
+  }
+  if (params.away !== undefined) {
+    body.set("away", String(params.away));
+  }
+  const payload = await client.request<ZulipApiResponse>("/users/me/status", {
+    method: "POST",
+    body: body.toString(),
+  });
+  assertSuccess(payload, "Zulip own status update failed");
+}
+
+export function getProfileFieldTypeName(typeId: number): string {
+  switch (typeId) {
+    case 1:
+      return "Short text";
+    case 2:
+      return "Long text";
+    case 3:
+      return "List of options";
+    case 4:
+      return "Date picker";
+    case 5:
+      return "Link";
+    case 6:
+      return "External account";
+    case 7:
+      return "Pronouns";
+    case 8:
+      return "User";
+    default:
+      return `Unknown (${typeId})`;
+  }
+}
+
+export async function listZulipCustomProfileFields(
+  client: ZulipClient,
+): Promise<ZulipCustomProfileField[]> {
+  const payload = await client.request<ZulipApiResponse & { custom_fields?: ZulipCustomProfileField[] }>(
+    "/realm/profile_fields",
+  );
+  assertSuccess(payload, "Zulip custom profile fields list failed");
+  return payload.custom_fields ?? [];
+}
+
+export async function getZulipUserProfileData(
+  client: ZulipClient,
+  userId: number,
+): Promise<ZulipUserProfileData> {
+  const payload = await client.request<
+    ZulipApiResponse & {
+      user?: {
+        profile_data?: ZulipUserProfileData;
+      };
+    }
+  >(`/users/${userId}`);
+  assertSuccess(payload, "Zulip user profile data fetch failed");
+  return payload.user?.profile_data ?? {};
+}
+
+export async function updateZulipMessageFlags(
+  client: ZulipClient,
+  params: {
+    messages: number[];
+    op: "add" | "remove";
+    flag: ZulipMessageFlag;
+  },
+): Promise<{ messages: number[] }> {
+  const body = new URLSearchParams();
+  body.set("messages", JSON.stringify(params.messages));
+  body.set("op", params.op);
+  body.set("flag", params.flag);
+  const payload = await client.request<ZulipApiResponse & { messages?: number[] }>("/messages/flags", {
+    method: "POST",
+    body: body.toString(),
+  });
+  assertSuccess(payload, "Zulip message flags update failed");
+  return { messages: payload.messages ?? [] };
+}
+
+export async function updateZulipMessageFlagsForNarrow(
+  client: ZulipClient,
+  params: {
+    narrow: Array<Record<string, unknown>>;
+    op: "add" | "remove";
+    flag: ZulipMessageFlag;
+    anchor?: number | string;
+    includeAnchor?: boolean;
+    numBefore?: number;
+    numAfter?: number;
+  },
+): Promise<{
+  messages: number[];
+  found_anchor: boolean;
+  found_oldest: boolean;
+  found_newest: boolean;
+}> {
+  const body = new URLSearchParams();
+  body.set("narrow", JSON.stringify(params.narrow));
+  body.set("op", params.op);
+  body.set("flag", params.flag);
+  if (params.anchor !== undefined) {
+    body.set("anchor", String(params.anchor));
+  }
+  if (params.includeAnchor !== undefined) {
+    body.set("include_anchor", String(params.includeAnchor));
+  }
+  if (params.numBefore !== undefined) {
+    body.set("num_before", String(params.numBefore));
+  }
+  if (params.numAfter !== undefined) {
+    body.set("num_after", String(params.numAfter));
+  }
+  const payload = await client.request<
+    ZulipApiResponse & {
+      messages?: number[];
+      found_anchor?: boolean;
+      found_oldest?: boolean;
+      found_newest?: boolean;
+    }
+  >("/messages/flags/narrow", {
+    method: "POST",
+    body: body.toString(),
+  });
+  assertSuccess(payload, "Zulip message flags narrow update failed");
+  return {
+    messages: payload.messages ?? [],
+    found_anchor: payload.found_anchor ?? false,
+    found_oldest: payload.found_oldest ?? false,
+    found_newest: payload.found_newest ?? false,
+  };
+}
+
+export async function getZulipReadReceipts(client: ZulipClient, messageId: number): Promise<number[]> {
+  const payload = await client.request<ZulipApiResponse & { user_ids?: number[] }>(
+    `/messages/${messageId}/read_receipts`,
+  );
+  assertSuccess(payload, "Zulip read receipts fetch failed");
+  return payload.user_ids ?? [];
+}
+
+export async function listZulipAlertWords(client: ZulipClient): Promise<string[]> {
+  const payload = await client.request<ZulipApiResponse & { alert_words?: string[] }>(
+    "/users/me/alert_words",
+  );
+  assertSuccess(payload, "Zulip alert words list failed");
+  return payload.alert_words ?? [];
+}
+
+export async function addZulipAlertWords(client: ZulipClient, words: string[]): Promise<string[]> {
+  const body = new URLSearchParams({
+    alert_words: JSON.stringify(words),
+  });
+  const payload = await client.request<ZulipApiResponse & { alert_words?: string[] }>(
+    "/users/me/alert_words",
+    {
+      method: "POST",
+      body: body.toString(),
+    },
+  );
+  assertSuccess(payload, "Zulip alert words add failed");
+  return payload.alert_words ?? [];
+}
+
+export async function removeZulipAlertWords(client: ZulipClient, words: string[]): Promise<string[]> {
+  const body = new URLSearchParams({
+    alert_words: JSON.stringify(words),
+  });
+  const payload = await client.request<ZulipApiResponse & { alert_words?: string[] }>(
+    "/users/me/alert_words",
+    {
+      method: "DELETE",
+      body: body.toString(),
+    },
+  );
+  assertSuccess(payload, "Zulip alert words remove failed");
+  return payload.alert_words ?? [];
+}
+
+export async function updateZulipUserTopic(
+  client: ZulipClient,
+  params: {
+    streamId: number;
+    topic: string;
+    visibilityPolicy: ZulipTopicVisibilityPolicy;
+  },
+): Promise<void> {
+  const body = new URLSearchParams({
+    stream_id: String(params.streamId),
+    topic: params.topic,
+    visibility_policy: String(params.visibilityPolicy),
+  });
+  const payload = await client.request<ZulipApiResponse>("/user_topics", {
+    method: "POST",
+    body: body.toString(),
+  });
+  assertSuccess(payload, "Zulip user topic update failed");
+}
+
+export async function listZulipMutedUsers(client: ZulipClient): Promise<ZulipMutedUser[]> {
+  const payload = await client.request<ZulipApiResponse & { muted_users?: ZulipMutedUser[] }>(
+    "/users/me/muted_users",
+  );
+  assertSuccess(payload, "Zulip muted users list failed");
+  return payload.muted_users ?? [];
+}
+
+export async function muteZulipUser(client: ZulipClient, userId: number): Promise<void> {
+  const payload = await client.request<ZulipApiResponse>(`/users/me/muted_users/${userId}`, {
+    method: "POST",
+  });
+  assertSuccess(payload, "Zulip mute user failed");
+}
+
+export async function unmuteZulipUser(client: ZulipClient, userId: number): Promise<void> {
+  const payload = await client.request<ZulipApiResponse>(`/users/me/muted_users/${userId}`, {
+    method: "DELETE",
+  });
+  assertSuccess(payload, "Zulip unmute user failed");
+}
+
+export async function updateZulipSubscriptionProperties(
+  client: ZulipClient,
+  properties: ZulipSubscriptionProperty[],
+): Promise<void> {
+  const body = new URLSearchParams({
+    subscription_data: JSON.stringify(properties),
+  });
+  const payload = await client.request<ZulipApiResponse>("/users/me/subscriptions/properties", {
+    method: "POST",
+    body: body.toString(),
+  });
+  assertSuccess(payload, "Zulip subscription properties update failed");
+}
+
+export async function listZulipAttachments(client: ZulipClient): Promise<ZulipAttachmentsResult> {
+  const payload = await client.request<
+    ZulipApiResponse & {
+      attachments?: ZulipAttachment[];
+      upload_space_used?: number;
+    }
+  >("/attachments");
+  assertSuccess(payload, "Zulip attachments list failed");
+  return {
+    attachments: payload.attachments ?? [],
+    uploadSpaceUsed: payload.upload_space_used ?? 0,
+  };
+}
+
+export async function deleteZulipAttachment(client: ZulipClient, attachmentId: number): Promise<void> {
+  const payload = await client.request<ZulipApiResponse>(`/attachments/${attachmentId}`, {
+    method: "DELETE",
+  });
+  assertSuccess(payload, "Zulip attachment delete failed");
+}
+
 export { normalizeZulipBaseUrl } from "./normalize.js";
