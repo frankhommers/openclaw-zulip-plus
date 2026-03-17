@@ -1,13 +1,27 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import { createReplyPrefixOptions } from "openclaw/plugin-sdk";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("./zulip/send.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./zulip/send.js")>();
+  return {
+    ...actual,
+    sendMessageZulip: vi.fn(async () => ({ messageId: "100", channelId: "ops" })),
+  };
+});
+
 import { zulipPlugin } from "./channel.js";
 import { SUBSCRIBED_TOKEN } from "./types.js";
 import { resolveZulipAccount } from "./zulip/accounts.js";
 import { normalizeEmojiName } from "./zulip/normalize.js";
+import { sendMessageZulip } from "./zulip/send.js";
 import { parseZulipTarget } from "./zulip/targets.js";
 
 describe("zulipPlugin", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   describe("messaging", () => {
     it("normalizes @username and zulip: targets", () => {
       const normalize = zulipPlugin.messaging?.normalizeTarget;
@@ -118,6 +132,22 @@ describe("zulipPlugin", () => {
       const account = resolveZulipAccount({ cfg, accountId: "default" });
       expect(account.streams).toEqual([SUBSCRIBED_TOKEN]);
     });
+
+    it("uses configured defaultAccount for channel defaults", () => {
+      const cfg: OpenClawConfig = {
+        channels: {
+          zulip: {
+            defaultAccount: "ops",
+            accounts: {
+              default: { name: "Default" },
+              ops: { name: "Ops" },
+            },
+          },
+        },
+      };
+
+      expect(zulipPlugin.config.defaultAccountId?.(cfg)).toBe("ops");
+    });
   });
 
   it("normalizes emoji names", () => {
@@ -158,6 +188,67 @@ describe("zulipPlugin", () => {
     if (res && res.ok) {
       expect(res.to).toBe("stream:marcel-ai#general chat");
     }
+  });
+
+  it("sendPayload sends text-only payloads through sendMessageZulip", async () => {
+    const cfg: OpenClawConfig = {
+      channels: {
+        zulip: {
+          enabled: true,
+          baseUrl: "https://zulip.example.com",
+          email: "bot@example.com",
+          apiKey: "key",
+          streams: ["ops"],
+        },
+      },
+    };
+
+    const result = await zulipPlugin.outbound?.sendPayload?.({
+      to: "stream:ops#deploy",
+      text: "Deploying now",
+      payload: { text: "Deploying now" },
+      cfg,
+      accountId: "default",
+    } as never);
+
+    expect(sendMessageZulip).toHaveBeenCalledWith("stream:ops#deploy", "Deploying now", {
+      accountId: "default",
+    });
+    expect(result).toEqual({ channel: "zulip", messageId: "100", channelId: "ops" });
+  });
+
+  it("sendPayload sends each media item and only includes text on the first one", async () => {
+    const cfg: OpenClawConfig = {
+      channels: {
+        zulip: {
+          enabled: true,
+          baseUrl: "https://zulip.example.com",
+          email: "bot@example.com",
+          apiKey: "key",
+          streams: ["ops"],
+        },
+      },
+    };
+
+    await zulipPlugin.outbound?.sendPayload?.({
+      to: "stream:ops#deploy",
+      text: "Artifacts",
+      payload: {
+        text: "Artifacts",
+        mediaUrls: ["https://example.com/a.png", "https://example.com/b.png"],
+      },
+      cfg,
+      accountId: "default",
+    } as never);
+
+    expect(sendMessageZulip).toHaveBeenNthCalledWith(1, "stream:ops#deploy", "Artifacts", {
+      accountId: "default",
+      mediaUrl: "https://example.com/a.png",
+    });
+    expect(sendMessageZulip).toHaveBeenNthCalledWith(2, "stream:ops#deploy", "", {
+      accountId: "default",
+      mediaUrl: "https://example.com/b.png",
+    });
   });
 
   it("defaults to alwaysReply (no mention requirement)", () => {

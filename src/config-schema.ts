@@ -96,5 +96,6 @@ const ZulipAccountSchemaBase = z
   .passthrough();
 
 export const ZulipConfigSchema = ZulipAccountSchemaBase.extend({
+  defaultAccount: z.string().optional(),
   accounts: z.record(z.string(), ZulipAccountSchemaBase.optional()).optional(),
 }).passthrough();

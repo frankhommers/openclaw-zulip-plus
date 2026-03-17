@@ -195,6 +195,20 @@ function readMessageId(params: Record<string, unknown>): string {
   throw new Error("messageId is required for Zulip message actions.");
 }
 
+function readMessageIdFromToolContext(toolContext: unknown): string | undefined {
+  if (!toolContext || typeof toolContext !== "object") {
+    return undefined;
+  }
+  const currentMessageId = (toolContext as { currentMessageId?: unknown }).currentMessageId;
+  if (typeof currentMessageId === "string" && currentMessageId.trim()) {
+    return currentMessageId;
+  }
+  if (typeof currentMessageId === "number" && Number.isFinite(currentMessageId)) {
+    return String(currentMessageId);
+  }
+  return undefined;
+}
+
 function readMessageContent(params: Record<string, unknown>): string {
   const content =
     readStringParam(params, "message", { allowEmpty: true }) ??
@@ -444,7 +458,7 @@ export const zulipMessageActions: ChannelMessageActionAdapter = {
     const accountId = typeof args.accountId === "string" ? args.accountId.trim() : undefined;
     return { to, accountId };
   },
-  handleAction: async ({ action, params, cfg, accountId }) => {
+  handleAction: async ({ action, params, cfg, accountId, toolContext }) => {
     const { client, account } = resolveZulipClient(cfg, accountId ?? undefined);
 
     if (action === "send") {
@@ -764,7 +778,19 @@ export const zulipMessageActions: ChannelMessageActionAdapter = {
     }
 
     if (action === "react") {
-      const messageId = readMessageId(params);
+      const messageId = (() => {
+        try {
+          return readMessageId(params);
+        } catch {
+          const fallbackMessageId = readMessageIdFromToolContext(toolContext);
+          if (fallbackMessageId) {
+            return fallbackMessageId;
+          }
+          throw new Error(
+            "messageId required. Provide messageId explicitly or react to the current inbound message.",
+          );
+        }
+      })();
       const emojiName =
         readStringParam(params, "emoji") ??
         readStringParam(params, "emojiName") ??

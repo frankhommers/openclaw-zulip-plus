@@ -5,3 +5,4 @@ dist/
 *.js.map
 !index.ts
 .env
+.worktrees/

@@ -22,6 +22,8 @@ export type ZulipApiSuccess = {
   msg?: string;
 };
 
+const ZULIP_USER_AGENT = "OpenClaw-Zulip-Plus/1.0";
+
 function buildAuthHeader(email: string, apiKey: string): string {
   const token = Buffer.from(`${email}:${apiKey}`, "utf8").toString("base64");
   return `Basic ${token}`;
@@ -85,6 +87,7 @@ export async function zulipRequest<T = unknown>(params: {
 
   const headers: Record<string, string> = {
     Authorization: buildAuthHeader(params.auth.email, params.auth.apiKey),
+    "User-Agent": ZULIP_USER_AGENT,
   };
   let body: string | undefined;
   if (params.form) {

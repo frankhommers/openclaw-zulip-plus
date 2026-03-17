@@ -129,6 +129,7 @@ export type ZulipAccountConfig = {
 };
 
 export type ZulipConfig = {
+  defaultAccount?: string;
   accounts?: Record<string, ZulipAccountConfig>;
 } & ZulipAccountConfig;
 

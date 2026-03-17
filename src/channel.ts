@@ -24,7 +24,7 @@ import {
 import { zulipMessageActions } from "./zulip/actions.js";
 import { monitorZulipProvider } from "./zulip/monitor.js";
 import { normalizeStreamName, normalizeTopic, normalizeZulipBaseUrl } from "./zulip/normalize.js";
-import { sendZulipStreamMessage } from "./zulip/send.js";
+import { sendMessageZulip, sendZulipStreamMessage } from "./zulip/send.js";
 import { parseZulipTarget } from "./zulip/targets.js";
 import { resolveOutboundMedia, uploadZulipFile } from "./zulip/uploads.js";
 
@@ -294,6 +294,24 @@ export const zulipPlugin: ChannelPlugin<ResolvedZulipAccount> = {
         const res = await sendZulipStreamMessage({ auth, stream, topic, content });
         return { channel: "zulip", messageId: String(res.id ?? "unknown") };
       }
+    },
+    sendPayload: async ({ to, payload, accountId }) => {
+      const text = payload.text ?? "";
+      const mediaUrls = payload.mediaUrls?.length ? payload.mediaUrls : payload.mediaUrl ? [payload.mediaUrl] : [];
+      if (mediaUrls.length > 0) {
+        let lastResult;
+        for (let i = 0; i < mediaUrls.length; i += 1) {
+          lastResult = await sendMessageZulip(to, i === 0 ? text : "", {
+            accountId: accountId ?? undefined,
+            mediaUrl: mediaUrls[i],
+          });
+        }
+        return { channel: "zulip", ...lastResult! };
+      }
+      const result = await sendMessageZulip(to, text, {
+        accountId: accountId ?? undefined,
+      });
+      return { channel: "zulip", ...result };
     },
   },
   status: {

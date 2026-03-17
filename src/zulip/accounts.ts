@@ -4,6 +4,7 @@ import {
   SUBSCRIBED_TOKEN,
   type ZulipAccountConfig,
   type ZulipChatMode,
+  type ZulipConfig,
   type ZulipReactionConfig,
 } from "../types.js";
 import { normalizeEmojiName, normalizeStreamName, normalizeTopic } from "./normalize.js";
@@ -131,8 +132,12 @@ const DEFAULT_PROCESSING_SPINNER = {
   intervalMs: 2000,
 };
 
+function resolveZulipSection(cfg: OpenClawConfig): ZulipConfig | undefined {
+  return cfg.channels?.zulip as ZulipConfig | undefined;
+}
+
 function listConfiguredAccountIds(cfg: OpenClawConfig): string[] {
-  const accounts = cfg.channels?.zulip?.accounts;
+  const accounts = resolveZulipSection(cfg)?.accounts;
   if (!accounts || typeof accounts !== "object") {
     return [];
   }
@@ -148,6 +153,14 @@ export function listZulipAccountIds(cfg: OpenClawConfig): string[] {
 }
 
 export function resolveDefaultZulipAccountId(cfg: OpenClawConfig): string {
+  const configuredDefault = resolveZulipSection(cfg)?.defaultAccount?.trim();
+  if (configuredDefault) {
+    const normalized = normalizeAccountId(configuredDefault);
+    const ids = listZulipAccountIds(cfg);
+    if (ids.includes(normalized)) {
+      return normalized;
+    }
+  }
   const ids = listZulipAccountIds(cfg);
   if (ids.includes(DEFAULT_ACCOUNT_ID)) {
     return DEFAULT_ACCOUNT_ID;
