@@ -42,6 +42,12 @@ export type ToolProgressParams = {
  */
 export type ToolProgressStatus = "running" | "success" | "error";
 
+type ToolProgressLine = {
+  minuteBucket: number;
+  timestamp: string;
+  text: string;
+};
+
 const STATUS_EMOJI: Record<ToolProgressStatus, string> = {
   running: "🔄",
   success: "✅",
@@ -49,7 +55,7 @@ const STATUS_EMOJI: Record<ToolProgressStatus, string> = {
 };
 
 export class ToolProgressAccumulator {
-  private lines: string[] = [];
+  private lines: ToolProgressLine[] = [];
   private messageId: number | undefined;
   private editTimer: NodeJS.Timeout | undefined;
   private flushInFlight: Promise<void> | undefined;
@@ -109,9 +115,54 @@ export class ToolProgressAccumulator {
     if (this.finalized) {
       return;
     }
-    const timestamp = formatClockTime(Date.now());
-    this.lines.push(`[${timestamp}] ${text}`);
+    const now = Date.now();
+    const timestamp = formatClockTime(now);
+    this.lines.push({
+      minuteBucket: Math.floor(now / 60000),
+      timestamp,
+      text,
+    });
     this.scheduleFlush();
+  }
+
+  private static extractToolType(text: string): string | undefined {
+    const cleaned = text.trim().replace(/^[^A-Za-z0-9]+/, "");
+    const match = cleaned.match(/^([A-Za-z][A-Za-z0-9_-]*)\s*:/);
+    return match?.[1];
+  }
+
+  private static renderGroupedLines(lines: ToolProgressLine[]): string[] {
+    const grouped: string[] = [];
+    let lastMinuteBucket: number | undefined;
+    for (const line of lines) {
+      if (line.minuteBucket !== lastMinuteBucket) {
+        grouped.push(`[${line.timestamp}]`);
+        lastMinuteBucket = line.minuteBucket;
+      }
+      grouped.push(line.text);
+    }
+    return grouped;
+  }
+
+  private static buildSpoilerTitle(lines: ToolProgressLine[]): string {
+    const counts = new Map<string, number>();
+    for (const line of lines) {
+      const toolType = ToolProgressAccumulator.extractToolType(line.text);
+      if (!toolType) {
+        continue;
+      }
+      counts.set(toolType, (counts.get(toolType) ?? 0) + 1);
+    }
+
+    if (counts.size === 0) {
+      return "Tool calls";
+    }
+
+    const summary = [...counts.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([toolType, count]) => `${toolType} ${count}`)
+      .join(" · ");
+    return `Tool calls · ${summary}`;
   }
 
   /**
@@ -148,10 +199,12 @@ export class ToolProgressAccumulator {
     const lastTimestamp = formatClockTime(Date.now());
     const emoji = STATUS_EMOJI[this.status] ?? "🔄";
     const header = `${emoji} **\`${name}\`**${modelSegment} · ${count} ${callWord} · updated ${lastTimestamp}`;
-    const sanitizedLines = this.lines.map((line) =>
+    const groupedLines = ToolProgressAccumulator.renderGroupedLines(this.lines);
+    const sanitizedLines = groupedLines.map((line) =>
       ToolProgressAccumulator.sanitizeForCodeFence(line),
     );
-    return `${header}\n\n\`\`\`spoiler Tool calls\n${sanitizedLines.join("\n")}\n\`\`\``;
+    const spoilerTitle = ToolProgressAccumulator.buildSpoilerTitle(this.lines);
+    return `${header}\n\n\`\`\`spoiler ${spoilerTitle}\n${sanitizedLines.join("\n")}\n\`\`\``;
   }
 
   /**

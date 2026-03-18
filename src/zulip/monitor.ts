@@ -1,6 +1,12 @@
 import crypto from "node:crypto";
+import fs from "node:fs/promises";
 import type { OpenClawConfig, ReplyPayload, RuntimeEnv } from "openclaw/plugin-sdk";
 import { createReplyPrefixOptions, createScopedPairingAccess } from "openclaw/plugin-sdk";
+import {
+  clearMainMessageRunRelay,
+  registerMainMessageRunRelay,
+  updateMainMessageRunRelay,
+} from "../agents/subagent-relay.js";
 import { getZulipRuntime } from "../runtime.js";
 import { isSubscribedMode, SUBSCRIBED_TOKEN } from "../types.js";
 import {
@@ -25,6 +31,12 @@ import {
   ZULIP_INFLIGHT_MAX_RETRY_COUNT,
   writeZulipInFlightCheckpoint,
 } from "./inflight-checkpoints.js";
+import {
+  isZulipMessageProcessed,
+  loadZulipProcessedMessageState,
+  markZulipMessageProcessed,
+  writeZulipProcessedMessageState,
+} from "./processed-message-state.js";
 import { normalizeStreamName, normalizeTopic } from "./normalize.js";
 import { buildZulipQueuePlan, buildZulipRegisterNarrow } from "./queue-plan.js";
 import {
@@ -66,6 +78,7 @@ type ZulipEventMessage = {
   id: number;
   type: string;
   sender_id: number;
+  is_bot?: boolean;
   sender_full_name?: string;
   sender_email?: string;
   display_recipient?: string;
@@ -96,6 +109,8 @@ type ZulipReactionEvent = {
 type ZulipUpdateMessageEvent = {
   id?: number;
   type: "update_message";
+  stream_id?: number;
+  orig_stream_id?: number;
   subject?: string;
   orig_subject?: string;
   topic?: string;
@@ -110,6 +125,8 @@ type ZulipEvent = {
   orig_subject?: string;
   topic?: string;
   orig_topic?: string;
+  stream_id?: number;
+  orig_stream_id?: number;
   op?: "add" | "remove" | "update" | "peer_add" | "peer_remove";
   subscriptions?: Array<{ stream_id?: number; name?: string }>;
   message_id?: number;
@@ -154,6 +171,13 @@ export const ZULIP_RECOVERY_PREFIX = "🔄 Gateway restarted";
 export const ZULIP_RECOVERY_NOTICE = `${ZULIP_RECOVERY_PREFIX} - resuming the previous task now...`;
 export const ZULIP_ERROR_PREFIX = "⚠️ Zulip plugin ran into an error";
 export const ZULIP_UNKNOWN_ERROR_PREFIX = "⚠️ Gateway ran into an unknown error";
+const DEFAULT_BOT_CHAIN_MAX_LENGTH = 3;
+const DEFAULT_BOT_CHAIN_COOLDOWN_MS = 30_000;
+const CHANNEL_HISTORY_MAX_CHANNELS = 200;
+const CHANNEL_HISTORY_MAX_PER_CHANNEL = 20;
+const THREAD_CONTEXT_FETCH_LIMIT = 6;
+const THREAD_CONTEXT_INCLUDE_LIMIT = 8;
+const THREAD_CONTEXT_MAX_TEXT_LENGTH = 220;
 
 /** Bare "Unknown error" text from the gateway, before we decorate it. */
 const BARE_UNKNOWN_ERROR = "Unknown error";
@@ -586,6 +610,63 @@ export function createBestEffortShutdownNoticeSender(params: {
   };
 }
 
+export function createMainMessageRelayHooks(params: {
+  provider: string;
+  accountId: string;
+  messageId: string | number;
+  runId?: string;
+  now?: () => number;
+}): {
+  runId: string;
+  markStatus: (status: string) => void;
+  onModelSelected: (ctx: { model?: string }) => void;
+  clear: () => void;
+} {
+  const messageId = String(params.messageId);
+  const runId = params.runId?.trim() || `${params.provider}:${params.accountId}:${messageId}`;
+  let cleared = false;
+
+  registerMainMessageRunRelay({
+    provider: params.provider,
+    accountId: params.accountId,
+    messageId,
+    runId,
+    status: "dispatching",
+    now: params.now,
+  });
+
+  const markStatus = (status: string) => {
+    if (cleared) {
+      return;
+    }
+    updateMainMessageRunRelay(runId, { status });
+  };
+
+  const onModelSelected = (ctx: { model?: string }) => {
+    if (cleared || !ctx.model) {
+      return;
+    }
+    updateMainMessageRunRelay(runId, {
+      model: ctx.model,
+      status: "model-selected",
+    });
+  };
+
+  const clear = () => {
+    if (cleared) {
+      return;
+    }
+    cleared = true;
+    clearMainMessageRunRelay({
+      provider: params.provider,
+      accountId: params.accountId,
+      messageId,
+    });
+  };
+
+  return { runId, markStatus, onModelSelected, clear };
+}
+
 export function computeZulipMonitorBackoffMs(params: {
   attempt: number;
   status: number | null;
@@ -667,6 +748,130 @@ function extractZulipHttpStatus(err: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+export type BotSenderClassification = "self" | "allowed-bot" | "other-bot" | "human";
+
+export type AllowedBotChainState = {
+  depth: number;
+  lastMessageAtMs: number;
+  startedAtMs: number;
+};
+
+type ChannelHistoryEntry = {
+  id: number;
+  sender: string;
+  text: string;
+  timestampMs?: number;
+};
+
+function normalizeHistoryText(content: string): string {
+  const collapsed = content
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!collapsed) {
+    return "(no text)";
+  }
+  return collapsed.length > THREAD_CONTEXT_MAX_TEXT_LENGTH
+    ? `${collapsed.slice(0, THREAD_CONTEXT_MAX_TEXT_LENGTH - 1).trimEnd()}…`
+    : collapsed;
+}
+
+function rememberChannelHistoryEntries(params: {
+  historyByChannel: Map<string, ChannelHistoryEntry[]>;
+  channelKey: string;
+  entries: ChannelHistoryEntry[];
+}) {
+  if (!params.channelKey || params.entries.length === 0) {
+    return;
+  }
+  const next = [...(params.historyByChannel.get(params.channelKey) ?? [])];
+  const seenIds = new Set(next.map((entry) => entry.id));
+  for (const entry of params.entries) {
+    if (seenIds.has(entry.id)) {
+      continue;
+    }
+    next.push(entry);
+    seenIds.add(entry.id);
+  }
+  const bounded = next.slice(-CHANNEL_HISTORY_MAX_PER_CHANNEL);
+  params.historyByChannel.delete(params.channelKey);
+  params.historyByChannel.set(params.channelKey, bounded);
+
+  while (params.historyByChannel.size > CHANNEL_HISTORY_MAX_CHANNELS) {
+    const oldestKey = params.historyByChannel.keys().next().value;
+    if (!oldestKey) {
+      break;
+    }
+    params.historyByChannel.delete(oldestKey);
+  }
+}
+
+function formatThreadContext(entries: ChannelHistoryEntry[]): string {
+  return entries.map((entry) => `[${entry.id}] ${entry.sender}: ${entry.text}`).join("\n");
+}
+
+function isLikelyExternalBotMessage(message: ZulipEventMessage): boolean {
+  if (message.is_bot === true) {
+    return true;
+  }
+
+  const email = message.sender_email?.trim().toLowerCase() ?? "";
+  if (email) {
+    const localPart = email.split("@")[0] ?? "";
+    if (localPart === "bot" || localPart.startsWith("bot-") || localPart.endsWith("-bot")) {
+      return true;
+    }
+  }
+
+  const fullName = message.sender_full_name?.trim().toLowerCase() ?? "";
+  return fullName === "bot" || fullName.startsWith("bot ") || fullName.endsWith(" bot");
+}
+
+export function resolveBotSenderClassification(params: {
+  message: ZulipEventMessage;
+  botUserId: number;
+  allowBotIds: Set<number>;
+}): BotSenderClassification {
+  if (params.message.sender_id === params.botUserId) {
+    return "self";
+  }
+  if (params.allowBotIds.has(params.message.sender_id)) {
+    return "allowed-bot";
+  }
+  if (isLikelyExternalBotMessage(params.message)) {
+    return "other-bot";
+  }
+  return "human";
+}
+
+export function evaluateAllowedBotChain(params: {
+  chainStateByThread: Map<string, AllowedBotChainState>;
+  threadKey: string;
+  nowMs: number;
+  maxChainLength: number;
+  cooldownMs: number;
+}): { allow: boolean; depth: number; startedAtMs: number; reason?: "max-chain-length" } {
+  const previous = params.chainStateByThread.get(params.threadKey);
+  const inCooldown =
+    Boolean(previous) && params.cooldownMs > 0
+      ? params.nowMs - (previous?.lastMessageAtMs ?? 0) <= params.cooldownMs
+      : Boolean(previous) && params.cooldownMs === 0;
+  const depth = inCooldown ? (previous?.depth ?? 0) + 1 : 1;
+  const startedAtMs = inCooldown ? (previous?.startedAtMs ?? params.nowMs) : params.nowMs;
+
+  params.chainStateByThread.set(params.threadKey, {
+    depth,
+    lastMessageAtMs: params.nowMs,
+    startedAtMs,
+  });
+
+  if (depth > params.maxChainLength) {
+    return { allow: false, reason: "max-chain-length", depth, startedAtMs };
+  }
+
+  return { allow: true, depth, startedAtMs };
+}
+
 function buildAuth(account: ResolvedZulipAccount): ZulipAuth {
   if (!account.baseUrl || !account.email || !account.apiKey) {
     throw new Error("Missing zulip baseUrl/email/apiKey");
@@ -688,13 +893,40 @@ function buildTopicKey(topic: string): string {
   return `${encoded.slice(0, 64)}~${digest}`;
 }
 
+function buildStreamTopicKey(stream: string, topic: string): string {
+  return `${buildTopicKey(stream)}:${buildTopicKey(topic)}`;
+}
+
+function parseStreamTopicKey(key: string): { streamKey: string; topicKey: string } {
+  const separator = key.indexOf(":");
+  if (separator < 0) {
+    return { streamKey: key, topicKey: "" };
+  }
+  return {
+    streamKey: key.slice(0, separator),
+    topicKey: key.slice(separator + 1),
+  };
+}
+
+function decodeCanonicalStreamTopicKey(key: string): { stream: string; topic: string } {
+  const { streamKey, topicKey } = parseStreamTopicKey(key);
+  return {
+    stream: decodeURIComponent(streamKey),
+    topic: decodeURIComponent(topicKey),
+  };
+}
+
 function isZulipUpdateMessageEvent(event: ZulipEvent): event is ZulipUpdateMessageEvent {
   return event.type === "update_message";
 }
 
 function parseTopicRenameEvent(
   event: ZulipEvent,
-): { fromTopic: string; toTopic: string } | undefined {
+  options: {
+    fallbackStream: string;
+    streamNamesById: Map<number, string>;
+  },
+): { fromStream: string; toStream: string; fromTopic: string; toTopic: string } | undefined {
   if (!isZulipUpdateMessageEvent(event)) {
     return undefined;
   }
@@ -709,21 +941,31 @@ function parseTopicRenameEvent(
     return undefined;
   }
 
-  return { fromTopic, toTopic };
+  const fallbackStream = normalizeStreamName(options.fallbackStream);
+  const fromStream =
+    (typeof event.orig_stream_id === "number"
+      ? options.streamNamesById.get(event.orig_stream_id)
+      : undefined) ?? fallbackStream;
+  const toStream =
+    (typeof event.stream_id === "number" ? options.streamNamesById.get(event.stream_id) : undefined) ??
+    fromStream;
+
+  if (!fromStream || !toStream) {
+    return undefined;
+  }
+
+  return { fromStream, toStream, fromTopic, toTopic };
 }
 
 function resolveCanonicalTopicSessionKey(params: {
-  aliasesByStream: Map<string, Map<string, string>>;
+  aliasesByStreamTopic: Map<string, string>;
   stream: string;
   topic: string;
 }): string {
-  const aliases = params.aliasesByStream.get(params.stream);
-  const topicKey = buildTopicKey(params.topic);
-  if (!aliases) {
-    return topicKey;
-  }
+  const streamTopicKey = buildStreamTopicKey(params.stream, params.topic);
+  const aliases = params.aliasesByStreamTopic;
 
-  let canonicalKey = topicKey;
+  let canonicalKey = streamTopicKey;
   const visited = new Set<string>();
   const visitedOrder: string[] = [];
 
@@ -739,7 +981,7 @@ function resolveCanonicalTopicSessionKey(params: {
 
   if (visitedOrder.length > 0) {
     for (const alias of visitedOrder) {
-      aliases.set(alias, canonicalKey);
+      params.aliasesByStreamTopic.set(alias, canonicalKey);
     }
   }
 
@@ -747,8 +989,9 @@ function resolveCanonicalTopicSessionKey(params: {
 }
 
 function recordTopicRenameAlias(params: {
-  aliasesByStream: Map<string, Map<string, string>>;
-  stream: string;
+  aliasesByStreamTopic: Map<string, string>;
+  fromStream: string;
+  toStream: string;
   fromTopic: string;
   toTopic: string;
 }): boolean {
@@ -759,13 +1002,13 @@ function recordTopicRenameAlias(params: {
   }
 
   const fromCanonicalKey = resolveCanonicalTopicSessionKey({
-    aliasesByStream: params.aliasesByStream,
-    stream: params.stream,
+    aliasesByStreamTopic: params.aliasesByStreamTopic,
+    stream: params.fromStream,
     topic: fromTopic,
   });
   const toCanonicalKey = resolveCanonicalTopicSessionKey({
-    aliasesByStream: params.aliasesByStream,
-    stream: params.stream,
+    aliasesByStreamTopic: params.aliasesByStreamTopic,
+    stream: params.toStream,
     topic: toTopic,
   });
 
@@ -773,13 +1016,7 @@ function recordTopicRenameAlias(params: {
     return false;
   }
 
-  let aliases = params.aliasesByStream.get(params.stream);
-  if (!aliases) {
-    aliases = new Map<string, string>();
-    params.aliasesByStream.set(params.stream, aliases);
-  }
-
-  aliases.set(toCanonicalKey, fromCanonicalKey);
+  params.aliasesByStreamTopic.set(toCanonicalKey, fromCanonicalKey);
   return true;
 }
 
@@ -823,6 +1060,68 @@ function stripOncharPrefix(
     }
   }
   return { triggered: false, stripped: text };
+}
+
+type ResolvedPersonaRoute = {
+  stream?: string;
+  topic?: string;
+  personaFile: string;
+};
+
+const MAX_PERSONA_FILE_BYTES = 32 * 1024;
+
+function resolvePersonaRoutes(account: ResolvedZulipAccount): ResolvedPersonaRoute[] {
+  const routes = account.config.personaRouting ?? [];
+  const resolved: ResolvedPersonaRoute[] = [];
+  for (const route of routes) {
+    const personaFile = route.personaFile?.trim();
+    if (!personaFile) {
+      continue;
+    }
+    const stream = normalizeStreamName(route.stream);
+    const topic = normalizeTopic(route.topic);
+    if (!stream && !topic) {
+      continue;
+    }
+    resolved.push({ stream, topic, personaFile });
+  }
+  return resolved;
+}
+
+function resolvePersonaFileForMessage(params: {
+  routes: ResolvedPersonaRoute[];
+  stream: string;
+  topic: string;
+}): string | undefined {
+  const matchingRoutes = params.routes.filter((route) => {
+    if (route.stream && route.stream !== params.stream) {
+      return false;
+    }
+    if (route.topic && route.topic !== params.topic) {
+      return false;
+    }
+    return true;
+  });
+  matchingRoutes.sort((a, b) => {
+    const aScore = (a.stream ? 1 : 0) + (a.topic ? 2 : 0);
+    const bScore = (b.stream ? 1 : 0) + (b.topic ? 2 : 0);
+    return bScore - aScore;
+  });
+  return matchingRoutes[0]?.personaFile;
+}
+
+function buildPersonaInjectedContent(params: {
+  personaPrompt?: string;
+  messageContent: string;
+}): string {
+  const personaPrompt = params.personaPrompt?.trim();
+  if (!personaPrompt) {
+    return params.messageContent;
+  }
+  if (!params.messageContent.trim()) {
+    return personaPrompt;
+  }
+  return `${personaPrompt}\n\n${params.messageContent}`;
 }
 
 function normalizeAllowEntry(entry: string): string {
@@ -942,11 +1241,11 @@ async function registerQueue(params: {
 async function fetchSubscribedStreams(params: {
   auth: ZulipAuth;
   abortSignal?: AbortSignal;
-}): Promise<string[]> {
+}): Promise<Array<{ streamId?: number; name: string }>> {
   const res = await zulipRequest<{
     result: "success" | "error";
     msg?: string;
-    subscriptions?: Array<{ name?: string }>;
+    subscriptions?: Array<{ stream_id?: number; name?: string }>;
   }>({
     auth: params.auth,
     method: "GET",
@@ -956,10 +1255,17 @@ async function fetchSubscribedStreams(params: {
   if (res.result !== "success") {
     throw new Error(res.msg || "Failed to fetch Zulip subscriptions");
   }
-  const normalized = (res.subscriptions ?? [])
-    .map((entry) => normalizeStreamName(entry.name))
-    .filter(Boolean);
-  return Array.from(new Set(normalized));
+  const seen = new Set<string>();
+  const normalized: Array<{ streamId?: number; name: string }> = [];
+  for (const entry of res.subscriptions ?? []) {
+    const name = normalizeStreamName(entry.name);
+    if (!name || seen.has(name)) {
+      continue;
+    }
+    seen.add(name);
+    normalized.push({ streamId: entry.stream_id, name });
+  }
+  return normalized;
 }
 
 function extractSubscribedStreamNames(evt: ZulipSubscriptionEvent): string[] {
@@ -1028,10 +1334,14 @@ function shouldIgnoreMessage(params: {
   message: ZulipEventMessage;
   botUserId: number;
   streams: string[];
+  senderClassification: BotSenderClassification;
 }): { ignore: boolean; reason?: string } {
   const msg = params.message;
-  if (msg.sender_id === params.botUserId) {
+  if (params.senderClassification === "self") {
     return { ignore: true, reason: "self" };
+  }
+  if (params.senderClassification === "other-bot") {
+    return { ignore: true, reason: "not-allowlisted-bot" };
   }
   if (msg.type !== "stream") {
     return { ignore: false };
@@ -1077,7 +1387,7 @@ export async function isBotAlreadyHandled(params: {
     id: number;
   } | undefined>;
   log?: (message: string) => void;
-}): Promise<{ handled: boolean; reason?: string }> {
+}): Promise<{ handled: boolean; reason?: string; completion?: "failure" | "success" }> {
   const { message, botUserId, successEmoji, failureEmoji, stream, topic, fetchMessage, fetchNewestInTopic, log } =
     params;
 
@@ -1095,21 +1405,24 @@ export async function isBotAlreadyHandled(params: {
     }
   }
   if (reactions) {
-    const completionEmoji = [successEmoji, failureEmoji];
-    const botHasCompletion = reactions.some(
-      (r) => r.user_id === botUserId && completionEmoji.includes(r.emoji_name),
-    );
-    if (botHasCompletion) {
-      log?.(`[zulip] skipping message ${message.id}: bot already has completion reaction`);
-      return { handled: true, reason: "bot-completion-reaction" };
+      const completionReaction = reactions.find(
+        (r) => r.user_id === botUserId && [successEmoji, failureEmoji].includes(r.emoji_name),
+      );
+      if (completionReaction) {
+        log?.(`[zulip] skipping message ${message.id}: bot already has completion reaction`);
+        return {
+          handled: true,
+          reason: "bot-completion-reaction",
+          completion: completionReaction.emoji_name === successEmoji ? "success" : "failure",
+        };
+      }
     }
-  }
 
   // --- Check 2: Bot was the last sender in the topic ---
   if (stream && topic) {
     try {
       const lastMsg = await fetchNewestInTopic(stream, topic);
-      if (lastMsg && lastMsg.sender_id === botUserId) {
+      if (lastMsg && lastMsg.sender_id === botUserId && lastMsg.id > message.id) {
         log?.(`[zulip] skipping message ${message.id}: bot was last sender in ${stream}#${topic} (msg ${lastMsg.id})`);
         return { handled: true, reason: "bot-was-last-sender" };
       }
@@ -1625,6 +1938,11 @@ export async function monitorZulipProvider(
     const botDisplayName = me.full_name?.trim() || "Agent";
     logger.warn(`[zulip-debug][${account.accountId}] bot user_id=${botUserId}`);
 
+    const allowBotIds = new Set(account.allowBotIds);
+    const maxBotChainLength = account.botLoopPrevention.maxChainLength;
+    const botChainCooldownMs = account.botLoopPrevention.cooldownMs;
+    const allowedBotChainByThread = new Map<string, AllowedBotChainState>();
+
     const fetchBotMessagesForStream = async (opts: {
       stream: string;
       senderEmail: string;
@@ -1669,6 +1987,32 @@ export async function monitorZulipProvider(
 
     // Dedupe cache prevents reprocessing messages after queue re-registration or reconnect.
     const dedupe = createDedupeCache({ ttlMs: 5 * 60 * 1000, maxSize: 500 });
+    const processedMessageState = await loadZulipProcessedMessageState({ accountId: account.accountId });
+    let processedMessageStateWriteChain = Promise.resolve();
+
+    const persistProcessedMessageWatermark = async (stream: string, messageId: number) => {
+      const changed = markZulipMessageProcessed({
+        state: processedMessageState,
+        stream,
+        messageId,
+      });
+      if (!changed) {
+        return;
+      }
+      processedMessageStateWriteChain = processedMessageStateWriteChain
+        .catch(() => undefined)
+        .then(() =>
+          writeZulipProcessedMessageState({
+            state: processedMessageState,
+            accountId: account.accountId,
+          }),
+        )
+        .catch((err) => {
+          runtime.error?.(`[zulip] failed to persist processed message state: ${String(err)}`);
+        });
+      await processedMessageStateWriteChain;
+    };
+
     const oncharEnabled = account.chatmode === "onchar";
     const oncharPrefixes = resolveOncharPrefixes(account.oncharPrefixes);
     const pairingAccess = createScopedPairingAccess({
@@ -1679,8 +2023,69 @@ export async function monitorZulipProvider(
 
     // Track DM senders we've already notified to avoid spam.
     const dmNotifiedSenders = new Set<number>();
-    // Topic-rename alias map per stream: renamed-topic-key -> canonical-topic-key.
-    const topicAliasesByStream = new Map<string, Map<string, string>>();
+    // Topic-rename alias map across stream/topic composites.
+    const topicAliasesByStreamTopic = new Map<string, string>();
+    const channelHistoryByThread = new Map<string, ChannelHistoryEntry[]>();
+    const streamNamesById = new Map<number, string>();
+    const personaRoutes = resolvePersonaRoutes(account);
+    const personaPromptCache = new Map<string, string | null>();
+    const subscribedStreams = await fetchSubscribedStreams({ auth, abortSignal });
+
+    const loadPersonaPrompt = async (personaFile: string): Promise<string | undefined> => {
+      const cached = personaPromptCache.get(personaFile);
+      if (cached !== undefined) {
+        return cached ?? undefined;
+      }
+      try {
+        const stats = await fs.lstat(personaFile);
+        if (!stats.isFile() || stats.isSymbolicLink()) {
+          personaPromptCache.set(personaFile, null);
+          return undefined;
+        }
+        if (stats.size > MAX_PERSONA_FILE_BYTES) {
+          logger.warn(
+            `[zulip:${account.accountId}] skipping oversized persona file ${personaFile} (${stats.size} bytes)`,
+          );
+          personaPromptCache.set(personaFile, null);
+          return undefined;
+        }
+        const content = await fs.readFile(personaFile, "utf8");
+        const prompt = content.trim();
+        personaPromptCache.set(personaFile, prompt || null);
+        return prompt || undefined;
+      } catch (err) {
+        const code =
+          err && typeof err === "object" && "code" in err
+            ? String((err as { code?: unknown }).code)
+            : "";
+        if (code === "ENOENT") {
+          logger.debug?.(
+            `[zulip:${account.accountId}] persona file missing for route: ${personaFile}`,
+          );
+        } else {
+          logger.warn(
+            `[zulip:${account.accountId}] failed to load persona file ${personaFile}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        personaPromptCache.set(personaFile, null);
+        return undefined;
+      }
+    };
+
+    const rememberStreamNameById = (streamId: number | undefined, streamName: string | undefined) => {
+      if (typeof streamId !== "number") {
+        return;
+      }
+      const normalized = normalizeStreamName(streamName);
+      if (!normalized) {
+        return;
+      }
+      streamNamesById.set(streamId, normalized);
+    };
+
+    for (const stream of subscribedStreams) {
+      rememberStreamNameById(stream.streamId, stream.name);
+    }
 
     const handleMessage = async (
       msg: ZulipEventMessage,
@@ -1692,7 +2097,17 @@ export async function monitorZulipProvider(
       if (dedupe.check(String(msg.id))) {
         return;
       }
-      const ignore = shouldIgnoreMessage({ message: msg, botUserId, streams: account.streams });
+      const senderClassification = resolveBotSenderClassification({
+        message: msg,
+        botUserId,
+        allowBotIds,
+      });
+      const ignore = shouldIgnoreMessage({
+        message: msg,
+        botUserId,
+        streams: account.streams,
+        senderClassification,
+      });
       if (ignore.ignore) {
         return;
       }
@@ -1720,6 +2135,9 @@ export async function monitorZulipProvider(
       }
 
       const stream = isDM ? "" : normalizeStreamName(msg.display_recipient);
+      if (!isDM) {
+        rememberStreamNameById(msg.stream_id, stream);
+      }
       const topic = normalizeTopic(msg.subject) || account.defaultTopic;
       const content = msg.content ?? "";
       if (!isDM && !stream) {
@@ -1741,6 +2159,52 @@ export async function monitorZulipProvider(
             return;
           }
         }
+      }
+
+      let allowedBotChainMetadata: { depth: number; startedAtMs: number } | undefined;
+      const canonicalThreadKey = isDM
+        ? `dm:${msg.sender_id}`
+        : `stream:${resolveCanonicalTopicSessionKey({
+            aliasesByStreamTopic: topicAliasesByStreamTopic,
+            stream,
+            topic,
+          })}`;
+      if (senderClassification === "allowed-bot") {
+        const chain = evaluateAllowedBotChain({
+          chainStateByThread: allowedBotChainByThread,
+          threadKey: canonicalThreadKey,
+          nowMs: Date.now(),
+          maxChainLength: maxBotChainLength,
+          cooldownMs: botChainCooldownMs,
+        });
+        if (!chain.allow) {
+          logger.warn(
+            `[zulip:${account.accountId}] skipping bot loop candidate message ${msg.id} in ${canonicalThreadKey}: chain depth ${chain.depth} exceeded max ${maxBotChainLength} within ${botChainCooldownMs}ms cooldown`,
+          );
+          return;
+        }
+        allowedBotChainMetadata = { depth: chain.depth, startedAtMs: chain.startedAtMs };
+      } else {
+        allowedBotChainByThread.delete(canonicalThreadKey);
+      }
+
+      if (
+        !isDM &&
+        isZulipMessageProcessed({
+          state: processedMessageState,
+          stream,
+          messageId: msg.id,
+        })
+      ) {
+        logger.info(
+          `[zulip:${account.accountId}] skipping message ${msg.id} in ${stream}#${topic}: already processed by durable watermark`,
+        );
+        if (isRecovery && messageOptions?.recoveryCheckpoint) {
+          await clearZulipInFlightCheckpoint({
+            checkpointId: messageOptions.recoveryCheckpoint.checkpointId,
+          }).catch(() => undefined);
+        }
+        return;
       }
       // Guard: skip messages the bot already handled in a previous session.
       // This prevents duplicate responses after gateway restarts, checkpoint
@@ -1784,6 +2248,9 @@ export async function monitorZulipProvider(
             await clearZulipInFlightCheckpoint({
               checkpointId: messageOptions.recoveryCheckpoint.checkpointId,
             }).catch(() => undefined);
+          }
+          if (alreadyHandled.completion === "success") {
+            await persistProcessedMessageWatermark(stream, msg.id);
           }
           return;
         }
@@ -1934,7 +2401,112 @@ export async function monitorZulipProvider(
         return;
       }
 
-      const peerId = isDM ? senderIdentity : stream;
+      const personaFile = !isDM
+        ? resolvePersonaFileForMessage({
+            routes: personaRoutes,
+            stream,
+            topic,
+          })
+        : undefined;
+      const personaPrompt = personaFile ? await loadPersonaPrompt(personaFile) : undefined;
+      const dispatchContent = isDM
+        ? cleanedContent
+        : buildPersonaInjectedContent({
+            personaPrompt,
+            messageContent: cleanedContent,
+          });
+
+      const canonicalTopicKey = isDM
+        ? undefined
+        : resolveCanonicalTopicSessionKey({
+            aliasesByStreamTopic: topicAliasesByStreamTopic,
+            stream,
+            topic,
+          });
+      const canonicalStream = canonicalTopicKey
+        ? decodeURIComponent(parseStreamTopicKey(canonicalTopicKey).streamKey)
+        : stream;
+      const peerId = isDM ? senderIdentity : canonicalStream;
+      const channelHistoryKey = isDM ? undefined : canonicalTopicKey ?? buildStreamTopicKey(stream, topic);
+
+      let threadContextEntries: ChannelHistoryEntry[] = [];
+      if (!isDM && channelHistoryKey) {
+        threadContextEntries = (channelHistoryByThread.get(channelHistoryKey) ?? []).filter(
+          (entry) => entry.id !== msg.id,
+        );
+        if (threadContextEntries.length === 0) {
+          const narrowTargets: Array<{ stream: string; topic: string }> = [{ stream, topic }];
+          if (canonicalTopicKey) {
+            const canonicalTarget = decodeCanonicalStreamTopicKey(canonicalTopicKey);
+            if (
+              canonicalTarget.stream !== stream ||
+              canonicalTarget.topic !== topic
+            ) {
+              narrowTargets.push(canonicalTarget);
+            }
+          }
+          try {
+            const fetchedEntriesById = new Map<number, ChannelHistoryEntry>();
+            for (const narrowTarget of narrowTargets) {
+              const recent = await zulipRequest<{
+                result: string;
+                messages?: Array<{
+                  id: number;
+                  sender_full_name?: string;
+                  sender_email?: string;
+                  sender_id?: number;
+                  content?: string;
+                  timestamp?: number;
+                }>;
+              }>({
+                auth,
+                method: "GET",
+                path: "/api/v1/messages",
+                query: {
+                  anchor: "newest",
+                  num_before: String(THREAD_CONTEXT_FETCH_LIMIT + 1),
+                  num_after: "0",
+                  narrow: JSON.stringify([["stream", narrowTarget.stream], ["topic", narrowTarget.topic]]),
+                  apply_markdown: "false",
+                },
+                abortSignal,
+              });
+              if (recent.result !== "success" || !recent.messages) {
+                continue;
+              }
+              for (const entry of recent.messages) {
+                if (typeof entry.id !== "number" || entry.id === msg.id) {
+                  continue;
+                }
+                fetchedEntriesById.set(entry.id, {
+                  id: entry.id,
+                  sender:
+                    entry.sender_full_name?.trim() ||
+                    entry.sender_email?.trim() ||
+                    String(entry.sender_id ?? "unknown"),
+                  text: normalizeHistoryText(entry.content ?? ""),
+                  timestampMs: typeof entry.timestamp === "number" ? entry.timestamp * 1000 : undefined,
+                });
+              }
+            }
+            if (fetchedEntriesById.size > 0) {
+              const fetchedEntries = Array.from(fetchedEntriesById.values()).sort((a, b) => a.id - b.id);
+              rememberChannelHistoryEntries({
+                historyByChannel: channelHistoryByThread,
+                channelKey: channelHistoryKey,
+                entries: fetchedEntries,
+              });
+              threadContextEntries = (channelHistoryByThread.get(channelHistoryKey) ?? []).filter(
+                (entry) => entry.id !== msg.id,
+              );
+            }
+          } catch {
+            // Best effort — thread context is optional enrichment.
+          }
+        }
+      }
+      threadContextEntries = threadContextEntries.slice(-THREAD_CONTEXT_INCLUDE_LIMIT);
+      const threadContext = formatThreadContext(threadContextEntries);
 
       const route = core.channel.routing.resolveAgentRoute({
         cfg,
@@ -1945,11 +2517,7 @@ export async function monitorZulipProvider(
       const baseSessionKey = route.sessionKey;
       const sessionKey = isDM
         ? baseSessionKey
-        : `${baseSessionKey}:topic:${resolveCanonicalTopicSessionKey({
-            aliasesByStream: topicAliasesByStream,
-            stream,
-            topic,
-          })}`;
+        : `${baseSessionKey}:topic:${canonicalTopicKey}`;
 
       const to = isDM ? `user:${senderIdentity}` : `stream:${stream}#${topic}`;
       const from = isDM ? `zulip:user:${senderIdentity}` : `zulip:channel:${stream}`;
@@ -1964,16 +2532,16 @@ export async function monitorZulipProvider(
         from: isDM ? senderName : `${stream} (${topic || account.defaultTopic})`,
         timestamp: typeof msg.timestamp === "number" ? msg.timestamp * 1000 : undefined,
         body: isDM
-          ? `${cleanedContent}\n[zulip message id: ${msg.id}]`
-          : `${cleanedContent}\n[zulip message id: ${msg.id} stream: ${stream} topic: ${topic}]`,
+          ? `${dispatchContent}\n[zulip message id: ${msg.id}]`
+          : `${dispatchContent}\n[zulip message id: ${msg.id} stream: ${stream} topic: ${topic}]`,
         chatType: isDM ? "direct" : "channel",
         sender: { name: senderName, id: String(msg.sender_id) },
       });
 
       const ctxPayload = core.channel.reply.finalizeInboundContext({
         Body: body,
-        RawBody: cleanedContent,
-        CommandBody: cleanedContent,
+        RawBody: dispatchContent,
+        CommandBody: dispatchContent,
         From: from,
         To: to,
         SessionKey: sessionKey,
@@ -1992,6 +2560,18 @@ export async function monitorZulipProvider(
         SenderName: senderName,
         SenderId: String(msg.sender_id),
         MessageSid: String(msg.id),
+        ThreadContext: threadContext || undefined,
+        ThreadContextMessages:
+          threadContextEntries.length > 0
+            ? threadContextEntries.map((entry) => ({
+                id: entry.id,
+                sender: entry.sender,
+                text: entry.text,
+                timestampMs: entry.timestampMs,
+              }))
+            : undefined,
+        BotChainDepth: allowedBotChainMetadata?.depth,
+        BotChainStartedAt: allowedBotChainMetadata?.startedAtMs,
         WasMentioned: isDM ? undefined : wasMentioned,
         OriginatingChannel: "zulip" as const,
         OriginatingTo: to,
@@ -2006,6 +2586,22 @@ export async function monitorZulipProvider(
       });
 
       const nowMs = Date.now();
+
+      if (!isDM && channelHistoryKey) {
+        rememberChannelHistoryEntries({
+          historyByChannel: channelHistoryByThread,
+          channelKey: channelHistoryKey,
+          entries: [
+            {
+              id: msg.id,
+              sender: senderName,
+              text: normalizeHistoryText(cleanedContent),
+              timestampMs: typeof msg.timestamp === "number" ? msg.timestamp * 1000 : undefined,
+            },
+          ],
+        });
+      }
+
       let checkpoint: ZulipInFlightCheckpoint | undefined;
       if (!isDM) {
         checkpoint = messageOptions?.recoveryCheckpoint
@@ -2055,12 +2651,18 @@ export async function monitorZulipProvider(
           channel: "zulip",
           accountId: account.accountId,
         });
+      const relay = createMainMessageRelayHooks({
+        provider: "zulip",
+        accountId: account.accountId,
+        messageId: msg.id,
+      });
       type ModelSelectedContext = Parameters<NonNullable<typeof originalOnModelSelected>>[0];
       const onModelSelected = (ctx: ModelSelectedContext) => {
         originalOnModelSelected?.(ctx);
         if (ctx.model && toolProgress) {
           toolProgress.setModel(ctx.model);
         }
+        relay.onModelSelected({ model: ctx.model });
       };
 
       let successfulDeliveries = 0;
@@ -2200,6 +2802,7 @@ export async function monitorZulipProvider(
       try {
         for (let attempt = 0; attempt <= MAX_DISPATCH_RETRIES; attempt++) {
           try {
+            relay.markStatus("processing");
             if (reactionController) {
               await reactionController.transition("processing", { abortSignal });
             }
@@ -2214,6 +2817,7 @@ export async function monitorZulipProvider(
               },
             });
             ok = true;
+            relay.markStatus("completed");
             lastDispatchError = undefined;
             break;
           } catch (err) {
@@ -2223,6 +2827,7 @@ export async function monitorZulipProvider(
               attempt < MAX_DISPATCH_RETRIES &&
               !(err instanceof Error && err.name === "AbortError");
             if (isRetryable) {
+              relay.markStatus("retrying");
               if (reactionController) {
                 await reactionController.transition("retrying", { abortSignal });
               }
@@ -2232,6 +2837,7 @@ export async function monitorZulipProvider(
               await sleep(2000, abortSignal).catch(() => undefined);
               continue;
             }
+            relay.markStatus("failed");
             opts.statusSink?.({ lastError: err instanceof Error ? err.message : String(err) });
             runtime.error?.(`zulip dispatch failed: ${String(err)}`);
           }
@@ -2250,6 +2856,7 @@ export async function monitorZulipProvider(
             },
           });
         } finally {
+          relay.clear();
           markDispatchIdle();
           // Finalize any remaining tool progress (best-effort final edit).
           // Use finalizeWithError() on failure so the header shows ❌ instead of ✅.
@@ -2351,9 +2958,14 @@ export async function monitorZulipProvider(
             }
           }
 
+          let persistedSuccessWatermark = false;
           if (checkpoint) {
             try {
               if (ok) {
+                if (!isDM) {
+                  await persistProcessedMessageWatermark(stream, msg.id);
+                  persistedSuccessWatermark = true;
+                }
                 await clearZulipInFlightCheckpoint({ checkpointId: checkpoint.checkpointId });
               } else {
                 checkpoint = markZulipCheckpointFailure({
@@ -2365,6 +2977,9 @@ export async function monitorZulipProvider(
             } catch (err) {
               runtime.error?.(`[zulip] failed to update in-flight checkpoint: ${String(err)}`);
             }
+          }
+          if (ok && !isDM && !persistedSuccessWatermark) {
+            await persistProcessedMessageWatermark(stream, msg.id);
           }
         }
       }
@@ -2694,6 +3309,22 @@ export async function monitorZulipProvider(
           continue;
         }
 
+        if (
+          isZulipMessageProcessed({
+            state: processedMessageState,
+            stream: checkpoint.stream,
+            messageId: checkpoint.messageId,
+          })
+        ) {
+          logger.info(
+            `[zulip:${account.accountId}] clearing recovery checkpoint ${checkpoint.checkpointId}: already covered by durable watermark`,
+          );
+          await clearZulipInFlightCheckpoint({ checkpointId: checkpoint.checkpointId }).catch(
+            () => undefined,
+          );
+          continue;
+        }
+
         await sendZulipStreamMessage({
           auth,
           stream: checkpoint.stream,
@@ -2909,19 +3540,29 @@ export async function monitorZulipProvider(
           );
 
           for (const evt of list) {
-            const rename = parseTopicRenameEvent(evt);
+            if (evt.type === "subscription") {
+              for (const subscription of evt.subscriptions ?? []) {
+                rememberStreamNameById(subscription.stream_id, subscription.name);
+              }
+            }
+
+            const rename = parseTopicRenameEvent(evt, {
+              fallbackStream: stream,
+              streamNamesById,
+            });
             if (!rename) {
               continue;
             }
             const mapped = recordTopicRenameAlias({
-              aliasesByStream: topicAliasesByStream,
-              stream,
+              aliasesByStreamTopic: topicAliasesByStreamTopic,
+              fromStream: rename.fromStream,
+              toStream: rename.toStream,
               fromTopic: rename.fromTopic,
               toTopic: rename.toTopic,
             });
             if (mapped) {
               logger.info(
-                `[zulip:${account.accountId}] mapped topic rename alias for stream "${stream}": "${rename.toTopic}" -> "${rename.fromTopic}"`,
+                `[zulip:${account.accountId}] mapped topic rename alias: "${rename.toStream}#${rename.toTopic}" -> "${rename.fromStream}#${rename.fromTopic}"`,
               );
             }
           }
@@ -2942,13 +3583,19 @@ export async function monitorZulipProvider(
           }
 
           for (const msg of messages) {
+            const senderClassification = resolveBotSenderClassification({
+              message: msg,
+              botUserId,
+              allowBotIds,
+            });
             const ignore = shouldIgnoreMessage({
               message: msg,
               botUserId,
               streams: account.streams,
+              senderClassification,
             });
             logger.warn(
-              `[zulip-debug][${account.accountId}] event msg id=${msg.id} topic="${msg.subject}" sender=${msg.sender_id} ignore=${ignore.ignore}${ignore.reason ? ` (${ignore.reason})` : ""}`,
+              `[zulip-debug][${account.accountId}] event msg id=${msg.id} topic="${msg.subject}" sender=${msg.sender_id} class=${senderClassification} ignore=${ignore.ignore}${ignore.reason ? ` (${ignore.reason})` : ""}`,
             );
           }
 
@@ -3051,9 +3698,10 @@ export async function monitorZulipProvider(
 
     // Clean up stale status messages from previous session.
     {
-      const streamsToClean = isSubscribedMode(account.streams)
-        ? await fetchSubscribedStreams({ auth, abortSignal })
-        : account.streams;
+      const cleanupStreams = isSubscribedMode(account.streams)
+        ? subscribedStreams
+        : account.streams.map((name) => ({ name }));
+      const streamsToClean = cleanupStreams.map((entry) => entry.name);
       await cleanupStaleStatusMessages({
         auth,
         streams: streamsToClean,
@@ -3161,9 +3809,10 @@ export async function monitorZulipProvider(
       logger.info(`[zulip:${account.accountId}] stopped monitoring stream "${normalized}"`);
     };
 
-    const initialStreams = await fetchSubscribedStreams({ auth, abortSignal });
+    const initialStreams = subscribedStreams;
     for (const stream of initialStreams) {
-      startStreamPoll(stream);
+      rememberStreamNameById(stream.streamId, stream.name);
+      startStreamPoll(stream.name);
     }
     logger.info(
       `[zulip:${account.accountId}] initialized ${initialStreams.length} subscribed stream poll(s)`,

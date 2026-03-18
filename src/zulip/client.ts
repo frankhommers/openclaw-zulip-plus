@@ -199,6 +199,8 @@ export type ZulipPresenceEntry = {
 
 export type ZulipPresenceMap = Record<string, ZulipPresenceEntry>;
 
+export type ZulipRealmPresenceMap = Record<string, ZulipPresenceMap>;
+
 export type ZulipServerSettings = ZulipApiResponse & Record<string, unknown>;
 
 export type ZulipRealmUpdate = Record<string, string | number | boolean>;
@@ -646,10 +648,11 @@ export async function sendZulipTyping(
   } else {
     body.set("to", JSON.stringify(params.to));
   }
-  await client.request("/typing", {
+  const payload = await client.request<ZulipApiResponse>("/typing", {
     method: "POST",
     body: body.toString(),
   });
+  assertSuccess(payload, "Zulip typing request failed");
 }
 
 export async function fetchZulipSubscriptions(
@@ -911,6 +914,60 @@ export async function deleteZulipMessage(
   assertSuccess(payload, "Zulip delete message failed");
 }
 
+export async function forwardZulipMessage(
+  client: ZulipClient,
+  params: {
+    messageId: string;
+    to: string;
+    topic?: string;
+  },
+): Promise<{ id?: number }> {
+  const body = new URLSearchParams({
+    to: params.to,
+  });
+  if (params.topic) {
+    body.set("topic", params.topic);
+  }
+  const payload = await client.request<ZulipApiResponse & { id?: number }>(
+    `/messages/${params.messageId}/forward`,
+    {
+      method: "POST",
+      body: body.toString(),
+    },
+  );
+  assertSuccess(payload, "Zulip forward message failed");
+  return { id: payload.id };
+}
+
+export async function renderZulipMarkdownPreview(
+  client: ZulipClient,
+  params: {
+    content: string;
+  },
+): Promise<{ rendered: string }> {
+  const body = new URLSearchParams({
+    content: params.content,
+  });
+  const payload = await client.request<
+    ZulipApiResponse & {
+      rendered?: string;
+      rendered_content?: string;
+    }
+  >("/messages/render", {
+    method: "POST",
+    body: body.toString(),
+  });
+  assertSuccess(payload, "Zulip markdown preview render failed");
+  return { rendered: payload.rendered ?? payload.rendered_content ?? "" };
+}
+
+export async function markAllZulipMessagesAsRead(client: ZulipClient): Promise<void> {
+  const payload = await client.request<ZulipApiResponse>("/mark_all_as_read", {
+    method: "POST",
+  });
+  assertSuccess(payload, "Zulip mark all messages as read failed");
+}
+
 export async function updateZulipMessageFlag(
   client: ZulipClient,
   params: {
@@ -987,6 +1044,8 @@ export async function searchZulipMessages(
     query: string;
     stream?: string;
     topic?: string;
+    dmWith?: string[];
+    isDirect?: boolean;
     limit?: number;
   },
 ): Promise<ZulipMessage[]> {
@@ -997,6 +1056,12 @@ export async function searchZulipMessages(
   }
   if (params.topic) {
     narrow.push({ operator: "topic", operand: params.topic });
+  }
+  if (params.isDirect) {
+    narrow.push({ operator: "is", operand: "dm" });
+  }
+  if (params.dmWith && params.dmWith.length > 0) {
+    narrow.push({ operator: "dm", operand: params.dmWith.join(",") });
   }
   const qs = new URLSearchParams({
     anchor: "newest",
@@ -1025,6 +1090,97 @@ export async function fetchZulipUserPresence(
   );
   assertSuccess(payload, "Zulip user presence failed");
   return payload.presence ?? {};
+}
+
+export async function getZulipRealmPresence(client: ZulipClient): Promise<ZulipRealmPresenceMap> {
+  const payload = await client.request<
+    ZulipApiResponse & {
+      presences?: ZulipRealmPresenceMap;
+    }
+  >("/realm/presence");
+  assertSuccess(payload, "Zulip realm presence failed");
+  return payload.presences ?? {};
+}
+
+export async function setZulipOwnPresence(
+  client: ZulipClient,
+  params: {
+    status?: "active" | "idle";
+    pingOnly?: boolean;
+    newUserInput?: boolean;
+  },
+): Promise<void> {
+  if (!params.status && params.pingOnly !== true) {
+    throw new Error("status is required to set presence unless pingOnly=true");
+  }
+  const body = new URLSearchParams();
+  if (params.status) {
+    body.set("status", params.status);
+  }
+  if (params.pingOnly !== undefined) {
+    body.set("ping_only", String(params.pingOnly));
+  }
+  if (params.newUserInput !== undefined) {
+    body.set("new_user_input", String(params.newUserInput));
+  }
+  const payload = await client.request<ZulipApiResponse>("/users/me/presence", {
+    method: "POST",
+    body: body.toString(),
+  });
+  assertSuccess(payload, "Zulip own presence update failed");
+}
+
+export async function createZulipUser(
+  client: ZulipClient,
+  params: {
+    email: string;
+    fullName: string;
+    password: string;
+    role?: number;
+  },
+): Promise<void> {
+  const body = new URLSearchParams({
+    email: params.email,
+    full_name: params.fullName,
+    password: params.password,
+  });
+  if (params.role !== undefined) {
+    body.set("role", String(params.role));
+  }
+  const payload = await client.request<ZulipApiResponse>("/users", {
+    method: "POST",
+    body: body.toString(),
+  });
+  assertSuccess(payload, "Zulip user create failed");
+}
+
+export async function updateZulipUser(
+  client: ZulipClient,
+  userId: number,
+  params: {
+    email?: string;
+    fullName?: string;
+    role?: number;
+  },
+): Promise<void> {
+  const body = new URLSearchParams();
+  if (params.email !== undefined) {
+    body.set("email", params.email);
+  }
+  if (params.fullName !== undefined) {
+    body.set("full_name", params.fullName);
+  }
+  if (params.role !== undefined) {
+    body.set("role", String(params.role));
+  }
+  if (Array.from(body.keys()).length === 0) {
+    throw new Error("No user updates provided.");
+  }
+  const payload = await client.request<ZulipApiResponse>(`/users/${userId}`, {
+    method: "PATCH",
+    body: body.toString(),
+  });
+  assertSuccess(payload, "Zulip user update failed");
 }
 
 export async function deactivateZulipUser(client: ZulipClient, userId: string): Promise<void> {
@@ -1081,6 +1237,14 @@ export type ZulipScheduledMessage = {
   failed: boolean;
 };
 
+export type ZulipReminder = {
+  reminder_id: number;
+  reminder_target_message_id?: number;
+  scheduled_delivery_timestamp: number;
+  content: string;
+  failed?: boolean;
+};
+
 export type ZulipUserGroup = {
   id: number;
   name: string;
@@ -1106,10 +1270,41 @@ export type ZulipDraft = {
   timestamp: number;
 };
 
+export type ZulipSavedSnippet = {
+  id: number;
+  title: string;
+  content: string;
+  date_created?: number;
+};
+
 export type ZulipLinkifier = {
   id: number;
   pattern: string;
   url_template: string;
+};
+
+export type ZulipInvitation = {
+  id: number;
+  email: string;
+  invited: number;
+};
+
+export type ZulipInviteLink = {
+  id: number;
+  linkUrl: string;
+};
+
+export type ZulipCodePlayground = {
+  id: number;
+  name: string;
+  pygments_language: string;
+  url_prefix: string;
+};
+
+export type ZulipDefaultStream = {
+  stream_id: number;
+  name?: string;
+  description?: string;
 };
 
 export type ZulipUserStatus = {
@@ -1130,6 +1325,11 @@ export type ZulipCustomProfileField = {
 };
 
 export type ZulipUserProfileData = Record<string, { value: string; rendered_value?: string }>;
+
+export type ZulipUserProfileDataUpdate = {
+  id: number;
+  value: string;
+};
 
 export type ZulipMessageFlag =
   | "read"
@@ -1153,6 +1353,18 @@ export type ZulipMessageDetails = {
   timestamp: number;
   reactions: Array<{ emoji_name: string; user_id: number }>;
   flags: string[];
+};
+
+export type ZulipMessageEditHistoryEntry = {
+  timestamp?: number;
+  user_id?: number;
+  prev_content?: string;
+  content?: string;
+  prev_topic?: string;
+  topic?: string;
+  prev_stream?: number;
+  stream?: number;
+  [key: string]: unknown;
 };
 
 export type ZulipGetMessagesResult = {
@@ -1374,6 +1586,17 @@ export async function getZulipMessagesAdvanced(
   };
 }
 
+export async function fetchZulipMessageEditHistory(
+  client: ZulipClient,
+  messageId: string,
+): Promise<ZulipMessageEditHistoryEntry[]> {
+  const payload = await client.request<
+    ZulipApiResponse & { message_history?: ZulipMessageEditHistoryEntry[] }
+  >(`/messages/${messageId}/history`);
+  assertSuccess(payload, "Zulip message edit history fetch failed");
+  return payload.message_history ?? [];
+}
+
 export async function updateZulipMessageContent(
   client: ZulipClient,
   messageId: number,
@@ -1515,6 +1738,44 @@ export async function deleteZulipScheduledMessage(
     method: "DELETE",
   });
   assertSuccess(payload, "Zulip scheduled message delete failed");
+}
+
+export async function listZulipReminders(client: ZulipClient): Promise<ZulipReminder[]> {
+  const payload = await client.request<ZulipApiResponse & { reminders?: ZulipReminder[] }>("/reminders");
+  assertSuccess(payload, "Zulip reminders list failed");
+  return payload.reminders ?? [];
+}
+
+export async function createZulipReminder(
+  client: ZulipClient,
+  params: {
+    messageId: number;
+    scheduledDeliveryTimestamp: number;
+    note?: string;
+  },
+): Promise<{ reminder_id: number }> {
+  const body = new URLSearchParams();
+  body.set("message_id", String(params.messageId));
+  body.set("scheduled_delivery_timestamp", String(params.scheduledDeliveryTimestamp));
+  if (params.note) {
+    body.set("note", params.note);
+  }
+  const payload = await client.request<ZulipApiResponse & { reminder_id?: number }>("/reminders", {
+    method: "POST",
+    body: body.toString(),
+  });
+  assertSuccess(payload, "Zulip reminder create failed");
+  if (typeof payload.reminder_id !== "number") {
+    throw new Error("Zulip reminder create missing reminder_id");
+  }
+  return { reminder_id: payload.reminder_id };
+}
+
+export async function deleteZulipReminder(client: ZulipClient, reminderId: number): Promise<void> {
+  const payload = await client.request<ZulipApiResponse>(`/reminders/${reminderId}`, {
+    method: "DELETE",
+  });
+  assertSuccess(payload, "Zulip reminder delete failed");
 }
 
 export async function listZulipUserGroups(client: ZulipClient): Promise<ZulipUserGroup[]> {
@@ -1745,6 +2006,68 @@ export async function deleteZulipDraft(client: ZulipClient, draftId: number): Pr
   assertSuccess(payload, "Zulip draft delete failed");
 }
 
+export async function listZulipSavedSnippets(client: ZulipClient): Promise<ZulipSavedSnippet[]> {
+  const payload = await client.request<ZulipApiResponse & { snippets?: ZulipSavedSnippet[] }>(
+    "/users/me/snippets",
+  );
+  assertSuccess(payload, "Zulip saved snippets list failed");
+  return payload.snippets ?? [];
+}
+
+export async function createZulipSavedSnippet(
+  client: ZulipClient,
+  params: {
+    title: string;
+    content: string;
+  },
+): Promise<{ id: number }> {
+  const body = new URLSearchParams({
+    title: params.title,
+    content: params.content,
+  });
+  const payload = await client.request<ZulipApiResponse & { id?: number }>("/users/me/snippets", {
+    method: "POST",
+    body: body.toString(),
+  });
+  assertSuccess(payload, "Zulip saved snippet create failed");
+  if (typeof payload.id !== "number") {
+    throw new Error("Zulip saved snippet create missing id");
+  }
+  return { id: payload.id };
+}
+
+export async function updateZulipSavedSnippet(
+  client: ZulipClient,
+  snippetId: number,
+  params: {
+    title?: string;
+    content?: string;
+  },
+): Promise<void> {
+  const body = new URLSearchParams();
+  if (params.title !== undefined) {
+    body.set("title", params.title);
+  }
+  if (params.content !== undefined) {
+    body.set("content", params.content);
+  }
+  if (Array.from(body.keys()).length === 0) {
+    throw new Error("No snippet updates provided.");
+  }
+  const payload = await client.request<ZulipApiResponse>(`/users/me/snippets/${snippetId}`, {
+    method: "PATCH",
+    body: body.toString(),
+  });
+  assertSuccess(payload, "Zulip saved snippet update failed");
+}
+
+export async function deleteZulipSavedSnippet(client: ZulipClient, snippetId: number): Promise<void> {
+  const payload = await client.request<ZulipApiResponse>(`/users/me/snippets/${snippetId}`, {
+    method: "DELETE",
+  });
+  assertSuccess(payload, "Zulip saved snippet delete failed");
+}
+
 export async function deleteZulipTopic(
   client: ZulipClient,
   streamId: number,
@@ -1934,6 +2257,119 @@ export async function getZulipUserProfileData(
   return payload.user?.profile_data ?? {};
 }
 
+export async function createZulipCustomProfileField(
+  client: ZulipClient,
+  params: {
+    name: string;
+    fieldType: number;
+    hint?: string;
+    fieldData?: string;
+    displayInProfileSummary?: boolean;
+  },
+): Promise<{ id: number }> {
+  const body = new URLSearchParams();
+  body.set("name", params.name);
+  body.set("field_type", String(params.fieldType));
+  if (params.hint !== undefined) {
+    body.set("hint", params.hint);
+  }
+  if (params.fieldData !== undefined) {
+    body.set("field_data", params.fieldData);
+  }
+  if (params.displayInProfileSummary !== undefined) {
+    body.set("display_in_profile_summary", String(params.displayInProfileSummary));
+  }
+  const payload = await client.request<ZulipApiResponse & { id?: number }>("/realm/profile_fields", {
+    method: "POST",
+    body: body.toString(),
+  });
+  assertSuccess(payload, "Zulip custom profile field create failed");
+  if (typeof payload.id !== "number") {
+    throw new Error("Zulip custom profile field create missing id");
+  }
+  return { id: payload.id };
+}
+
+export async function updateZulipCustomProfileField(
+  client: ZulipClient,
+  fieldId: number,
+  params: {
+    name?: string;
+    fieldType?: number;
+    hint?: string;
+    fieldData?: string;
+    displayInProfileSummary?: boolean;
+  },
+): Promise<void> {
+  const body = new URLSearchParams();
+  if (params.name !== undefined) {
+    body.set("name", params.name);
+  }
+  if (params.fieldType !== undefined) {
+    body.set("field_type", String(params.fieldType));
+  }
+  if (params.hint !== undefined) {
+    body.set("hint", params.hint);
+  }
+  if (params.fieldData !== undefined) {
+    body.set("field_data", params.fieldData);
+  }
+  if (params.displayInProfileSummary !== undefined) {
+    body.set("display_in_profile_summary", String(params.displayInProfileSummary));
+  }
+  if (Array.from(body.keys()).length === 0) {
+    throw new Error("No custom profile field updates provided.");
+  }
+  const payload = await client.request<ZulipApiResponse>(`/realm/profile_fields/${fieldId}`, {
+    method: "PATCH",
+    body: body.toString(),
+  });
+  assertSuccess(payload, "Zulip custom profile field update failed");
+}
+
+export async function deleteZulipCustomProfileField(
+  client: ZulipClient,
+  fieldId: number,
+): Promise<void> {
+  const payload = await client.request<ZulipApiResponse>(`/realm/profile_fields/${fieldId}`, {
+    method: "DELETE",
+  });
+  assertSuccess(payload, "Zulip custom profile field delete failed");
+}
+
+export async function reorderZulipCustomProfileFields(
+  client: ZulipClient,
+  order: number[],
+): Promise<void> {
+  if (order.length === 0) {
+    throw new Error("order must contain at least one custom profile field id");
+  }
+  const body = new URLSearchParams();
+  body.set("order", JSON.stringify(order));
+  const payload = await client.request<ZulipApiResponse>("/realm/profile_fields", {
+    method: "PATCH",
+    body: body.toString(),
+  });
+  assertSuccess(payload, "Zulip custom profile fields reorder failed");
+}
+
+export async function updateZulipUserProfileData(
+  client: ZulipClient,
+  userId: number,
+  data: ZulipUserProfileDataUpdate[],
+): Promise<void> {
+  if (data.length === 0) {
+    throw new Error("data must contain at least one profile field update");
+  }
+  const body = new URLSearchParams();
+  body.set("data", JSON.stringify(data));
+  const payload = await client.request<ZulipApiResponse>(`/users/${userId}/profile_data`, {
+    method: "PATCH",
+    body: body.toString(),
+  });
+  assertSuccess(payload, "Zulip user profile data update failed");
+}
+
 export async function updateZulipMessageFlags(
   client: ZulipClient,
   params: {
@@ -2051,6 +2487,187 @@ export async function removeZulipAlertWords(client: ZulipClient, words: string[]
   );
   assertSuccess(payload, "Zulip alert words remove failed");
   return payload.alert_words ?? [];
+}
+
+export async function listZulipInvitations(client: ZulipClient): Promise<{
+  invites: ZulipInvitation[];
+  inviteLinks: ZulipInviteLink[];
+}> {
+  const payload = await client.request<
+    ZulipApiResponse & {
+      invites?: ZulipInvitation[];
+      invite_links?: Array<{ id?: number; link_url?: string }>;
+    }
+  >("/invites");
+  assertSuccess(payload, "Zulip invitations list failed");
+  return {
+    invites: payload.invites ?? [],
+    inviteLinks: (payload.invite_links ?? [])
+      .filter(
+        (link): link is { id: number; link_url: string } =>
+          typeof link?.id === "number" && typeof link?.link_url === "string",
+      )
+      .map((link) => ({ id: link.id, linkUrl: link.link_url })),
+  };
+}
+
+export async function sendZulipInvitation(
+  client: ZulipClient,
+  params: {
+    emails: string[];
+    streamIds?: number[];
+    inviteAs?: number;
+    includeRealmDefaultSubscriptions?: boolean;
+  },
+): Promise<void> {
+  const body = new URLSearchParams({
+    invitee_emails: JSON.stringify(params.emails),
+  });
+  if (params.streamIds !== undefined) {
+    body.set("stream_ids", JSON.stringify(params.streamIds));
+  }
+  if (params.inviteAs !== undefined) {
+    body.set("invite_as", String(params.inviteAs));
+  }
+  if (params.includeRealmDefaultSubscriptions !== undefined) {
+    body.set(
+      "include_realm_default_subscriptions",
+      String(params.includeRealmDefaultSubscriptions),
+    );
+  }
+  const payload = await client.request<ZulipApiResponse>("/invites", {
+    method: "POST",
+    body: body.toString(),
+  });
+  assertSuccess(payload, "Zulip invite send failed");
+}
+
+export async function createZulipInviteLink(
+  client: ZulipClient,
+  params: {
+    streamIds?: number[];
+    inviteAs?: number;
+    inviteExpiresInMinutes?: number;
+    includeRealmDefaultSubscriptions?: boolean;
+  },
+): Promise<{ invite_link_url: string; id: number }> {
+  const body = new URLSearchParams();
+  if (params.streamIds !== undefined) {
+    body.set("stream_ids", JSON.stringify(params.streamIds));
+  }
+  if (params.inviteAs !== undefined) {
+    body.set("invite_as", String(params.inviteAs));
+  }
+  if (params.inviteExpiresInMinutes !== undefined) {
+    body.set("invite_expires_in_minutes", String(params.inviteExpiresInMinutes));
+  }
+  if (params.includeRealmDefaultSubscriptions !== undefined) {
+    body.set(
+      "include_realm_default_subscriptions",
+      String(params.includeRealmDefaultSubscriptions),
+    );
+  }
+  const payload = await client.request<
+    ZulipApiResponse & {
+      invite_link_url?: string;
+      id?: number;
+    }
+  >("/invites/multiuse", {
+    method: "POST",
+    body: body.toString(),
+  });
+  assertSuccess(payload, "Zulip invite link create failed");
+  if (typeof payload.invite_link_url !== "string" || typeof payload.id !== "number") {
+    throw new Error("Zulip invite link create missing invite_link_url or id");
+  }
+  return { invite_link_url: payload.invite_link_url, id: payload.id };
+}
+
+export async function revokeZulipInviteLink(client: ZulipClient, inviteLinkId: number): Promise<void> {
+  const payload = await client.request<ZulipApiResponse>(`/invites/multiuse/${inviteLinkId}/revoke`, {
+    method: "POST",
+  });
+  assertSuccess(payload, "Zulip invite link revoke failed");
+}
+
+export async function revokeZulipInvitation(client: ZulipClient, inviteId: number): Promise<void> {
+  const payload = await client.request<ZulipApiResponse>(`/invites/${inviteId}`, {
+    method: "DELETE",
+  });
+  assertSuccess(payload, "Zulip invite revoke failed");
+}
+
+export async function resendZulipInvitation(client: ZulipClient, inviteId: number): Promise<void> {
+  const payload = await client.request<ZulipApiResponse>(`/invites/${inviteId}/resend`, {
+    method: "POST",
+  });
+  assertSuccess(payload, "Zulip invite resend failed");
+}
+
+export async function listZulipCodePlaygrounds(client: ZulipClient): Promise<ZulipCodePlayground[]> {
+  const payload = await client.request<ZulipApiResponse & { playgrounds?: ZulipCodePlayground[] }>(
+    "/realm/playgrounds",
+  );
+  assertSuccess(payload, "Zulip code playground list failed");
+  return payload.playgrounds ?? [];
+}
+
+export async function addZulipCodePlayground(
+  client: ZulipClient,
+  params: {
+    name: string;
+    pygmentsLanguage: string;
+    urlPrefix: string;
+  },
+): Promise<{ id: number }> {
+  const body = new URLSearchParams({
+    name: params.name,
+    pygments_language: params.pygmentsLanguage,
+    url_prefix: params.urlPrefix,
+  });
+  const payload = await client.request<ZulipApiResponse & { id?: number }>("/realm/playgrounds", {
+    method: "POST",
+    body: body.toString(),
+  });
+  assertSuccess(payload, "Zulip code playground add failed");
+  if (typeof payload.id !== "number") {
+    throw new Error("Zulip code playground add missing id");
+  }
+  return { id: payload.id };
+}
+
+export async function removeZulipCodePlayground(
+  client: ZulipClient,
+  playgroundId: number,
+): Promise<void> {
+  const payload = await client.request<ZulipApiResponse>(`/realm/playgrounds/${playgroundId}`, {
+    method: "DELETE",
+  });
+  assertSuccess(payload, "Zulip code playground remove failed");
+}
+
+export async function listZulipDefaultStreams(client: ZulipClient): Promise<ZulipDefaultStream[]> {
+  const payload = await client.request<
+    ZulipApiResponse & { streams?: ZulipDefaultStream[]; default_streams?: ZulipDefaultStream[] }
+  >("/default_streams");
+  assertSuccess(payload, "Zulip default streams list failed");
+  return payload.streams ?? payload.default_streams ?? [];
+}
+
+export async function addZulipDefaultStream(client: ZulipClient, streamId: number): Promise<void> {
+  const body = new URLSearchParams({ stream_id: String(streamId) });
+  const payload = await client.request<ZulipApiResponse>("/default_streams", {
+    method: "POST",
+    body: body.toString(),
+  });
+  assertSuccess(payload, "Zulip default stream add failed");
+}
+
+export async function removeZulipDefaultStream(client: ZulipClient, streamId: number): Promise<void> {
+  const payload = await client.request<ZulipApiResponse>(`/default_streams/${streamId}`, {
+    method: "DELETE",
+  });
+  assertSuccess(payload, "Zulip default stream remove failed");
 }
 
 export async function updateZulipUserTopic(

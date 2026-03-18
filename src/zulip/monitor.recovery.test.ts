@@ -1,3 +1,6 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -20,6 +23,10 @@ const mocks = vi.hoisted(() => ({
   prepareZulipCheckpointForRecovery: vi.fn(),
   markZulipCheckpointFailure: vi.fn(),
   buildZulipCheckpointId: vi.fn(),
+  loadZulipProcessedMessageState: vi.fn(),
+  isZulipMessageProcessed: vi.fn(),
+  markZulipMessageProcessed: vi.fn(),
+  writeZulipProcessedMessageState: vi.fn(),
 }));
 
 vi.mock("openclaw/plugin-sdk", async (importOriginal) => {
@@ -75,6 +82,13 @@ vi.mock("./inflight-checkpoints.js", () => ({
   buildZulipCheckpointId: mocks.buildZulipCheckpointId,
 }));
 
+vi.mock("./processed-message-state.js", () => ({
+  loadZulipProcessedMessageState: mocks.loadZulipProcessedMessageState,
+  isZulipMessageProcessed: mocks.isZulipMessageProcessed,
+  markZulipMessageProcessed: mocks.markZulipMessageProcessed,
+  writeZulipProcessedMessageState: mocks.writeZulipProcessedMessageState,
+}));
+
 import { monitorZulipProvider, ZULIP_RECOVERY_NOTICE } from "./monitor.js";
 
 type ZulipEventMessage = {
@@ -108,6 +122,27 @@ type ZulipReactionHarnessEvent = {
 };
 
 type ZulipHarnessEvent = ZulipEventMessage | ZulipReactionHarnessEvent;
+
+type ThreadHistoryMessage = {
+  id: number;
+  sender_id: number;
+  sender_full_name?: string;
+  sender_email?: string;
+  content?: string;
+  timestamp?: number;
+};
+
+function getDispatchCall(
+  dispatchReplyFromConfig: ReturnType<typeof vi.fn>,
+  index: number,
+): { ctx?: Record<string, unknown> } | undefined {
+  const calls = dispatchReplyFromConfig.mock.calls as Array<[unknown]>;
+  const entry = calls[index];
+  if (!entry) {
+    return undefined;
+  }
+  return entry[0] as { ctx?: Record<string, unknown> };
+}
 
 function makeCheckpoint(overrides?: Partial<Record<string, unknown>>) {
   const base = {
@@ -158,6 +193,9 @@ function createHarness(params?: {
   checkpoints?: Array<Record<string, unknown>>;
   staleCheckpoints?: boolean;
   reactions?: Record<string, unknown>;
+  personaRouting?: Array<{ stream?: string; topic?: string; personaFile?: string }>;
+  recentTopicMessages?: ThreadHistoryMessage[];
+  recentTopicMessagesByNarrow?: Record<string, ThreadHistoryMessage[]>;
 }) {
   const dispatchReplyFromConfig = vi.fn(async () => undefined);
   const logger = {
@@ -218,24 +256,76 @@ function createHarness(params?: {
   mocks.getZulipRuntime.mockReturnValue(runtime);
   mocks.createReplyPrefixOptions.mockReturnValue({ onModelSelected: undefined });
 
+  const defaultReactions = {
+    enabled: false,
+    onStart: "eyes",
+    onSuccess: "check",
+    onFailure: "warning",
+    clearOnFinish: true,
+    genericCallback: {
+      enabled: false,
+      includeRemoveOps: false,
+    },
+    workflow: {
+      enabled: false,
+      replaceStageReaction: false,
+      minTransitionMs: 0,
+      stages: {
+        queued: "",
+        processing: "",
+        toolRunning: "",
+        retrying: "",
+        success: "check",
+        partialSuccess: "warning",
+        failure: "warning",
+      },
+    },
+  };
+  const customReactions = (params?.reactions ?? {}) as Record<string, unknown>;
+
   mocks.resolveZulipAccount.mockReturnValue({
     accountId: "default",
     baseUrl: "https://zulip.example.com",
     email: "bot@zulip.example.com",
     apiKey: "api-key",
     streams: ["marcel"],
+    allowBotIds: [],
+    botLoopPrevention: {
+      maxChainLength: 3,
+      cooldownMs: 30_000,
+    },
+    chatmode: "all",
+    blockStreaming: true,
     defaultTopic: "general",
     alwaysReply: true,
     textChunkLimit: 10_000,
-    reactions: params?.reactions ?? {
+    config: {
+      personaRouting: params?.personaRouting ?? [],
+    },
+    workingMessages: {
       enabled: false,
-      onStart: "eyes",
-      onSuccess: "check",
-      onFailure: "warning",
-      clearOnFinish: true,
+    },
+    processingSpinner: {
+      enabled: false,
+      emoji: [],
+      intervalMs: 10_000,
+    },
+    reactions: {
+      ...defaultReactions,
+      ...customReactions,
       genericCallback: {
-        enabled: false,
-        includeRemoveOps: false,
+        ...defaultReactions.genericCallback,
+        ...((customReactions.genericCallback as Record<string, unknown> | undefined) ?? {}),
+      },
+      workflow: {
+        ...defaultReactions.workflow,
+        ...((customReactions.workflow as Record<string, unknown> | undefined) ?? {}),
+        stages: {
+          ...defaultReactions.workflow.stages,
+          ...((
+            (customReactions.workflow as { stages?: Record<string, unknown> } | undefined)?.stages ?? {}
+          ) as Record<string, unknown>),
+        },
       },
     },
   });
@@ -267,6 +357,13 @@ function createHarness(params?: {
     ({ accountId, messageId }: { accountId: string; messageId: number }) =>
       `${accountId}:${messageId}`,
   );
+  mocks.loadZulipProcessedMessageState.mockResolvedValue({
+    version: 1,
+    watermarks: {},
+  });
+  mocks.isZulipMessageProcessed.mockReturnValue(false);
+  mocks.markZulipMessageProcessed.mockReturnValue(true);
+  mocks.writeZulipProcessedMessageState.mockResolvedValue(undefined);
 
   let pollCount = 0;
   const eventList = params?.events ?? [];
@@ -275,10 +372,12 @@ function createHarness(params?: {
     async ({
       path,
       method,
+      query,
       abortSignal,
     }: {
       path: string;
       method?: string;
+      query?: Record<string, unknown>;
       abortSignal?: AbortSignal;
     }) => {
       if (path === "/api/v1/users/me") {
@@ -318,6 +417,26 @@ function createHarness(params?: {
       }
       if (path === "/api/v1/typing") {
         return { result: "success" };
+      }
+      if (path === "/api/v1/messages") {
+        const narrow = typeof query?.narrow === "string" ? query.narrow : "";
+        const hasTopicNarrow = narrow.includes('"topic"');
+        if (hasTopicNarrow) {
+          if (params?.recentTopicMessagesByNarrow?.[narrow]) {
+            return {
+              result: "success",
+              messages: params.recentTopicMessagesByNarrow[narrow],
+            };
+          }
+          return {
+            result: "success",
+            messages: params?.recentTopicMessages ?? [],
+          };
+        }
+        return {
+          result: "success",
+          messages: [],
+        };
       }
       return { result: "success" };
     },
@@ -550,7 +669,7 @@ describe("monitorZulipProvider recovery checkpoints", () => {
 
     await waitForCondition(() => dispatchReplyFromConfig.mock.calls.length > 0);
 
-    const call = dispatchReplyFromConfig.mock.calls[0]?.[0] as { ctx?: Record<string, unknown> };
+    const call = getDispatchCall(dispatchReplyFromConfig, 0);
     expect(call?.ctx).toMatchObject({
       CommandBody: "reaction_add_fire",
       To: "stream:marcel#general",
@@ -690,4 +809,312 @@ describe("monitorZulipProvider recovery checkpoints", () => {
     monitor.stop();
     await (monitor as { done: Promise<void> }).done;
   });
+
+  it("skips recovery replay when durable watermark already covers the checkpoint message", async () => {
+    const checkpoint = makeCheckpoint({ messageId: 9001, checkpointId: "default:9001" });
+
+    const { dispatchReplyFromConfig } = createHarness({ checkpoints: [checkpoint] });
+    mocks.loadZulipProcessedMessageState.mockResolvedValue({
+      version: 1,
+      watermarks: {
+        default: {
+          marcel: 9001,
+        },
+      },
+    });
+    mocks.isZulipMessageProcessed.mockImplementation(
+      ({ messageId }: { messageId: number }) => messageId <= 9001,
+    );
+    const monitor = await monitorZulipProvider({
+      config: {} as never,
+      runtime: {
+        log: vi.fn(),
+        error: vi.fn(),
+        exit: vi.fn(),
+      },
+    });
+
+    await waitForCondition(() => mocks.clearZulipInFlightCheckpoint.mock.calls.length > 0);
+
+    const recoveryNoticeCalls = mocks.sendZulipStreamMessage.mock.calls.filter(
+      ([arg]) => (arg as { content?: string }).content === ZULIP_RECOVERY_NOTICE,
+    );
+    expect(recoveryNoticeCalls).toHaveLength(0);
+    expect(dispatchReplyFromConfig).not.toHaveBeenCalled();
+    expect(mocks.clearZulipInFlightCheckpoint).toHaveBeenCalledWith({
+      checkpointId: checkpoint.checkpointId,
+    });
+
+    monitor.stop();
+    await (monitor as { done: Promise<void> }).done;
+  });
+
+  it("fetches recent thread context and includes it in dispatch payload", async () => {
+    const event: ZulipEventMessage = {
+      id: 9100,
+      type: "stream",
+      sender_id: 55,
+      sender_full_name: "Tester",
+      display_recipient: "marcel",
+      stream_id: 42,
+      subject: "general",
+      content: "current request",
+      timestamp: Math.floor(Date.now() / 1000),
+    };
+    const { dispatchReplyFromConfig } = createHarness({
+      events: [event],
+      recentTopicMessages: [
+        {
+          id: 9098,
+          sender_id: 77,
+          sender_full_name: "Alice",
+          content: "earlier context one",
+          timestamp: Math.floor(Date.now() / 1000) - 90,
+        },
+        {
+          id: 9099,
+          sender_id: 78,
+          sender_full_name: "Bob",
+          content: "earlier context two",
+          timestamp: Math.floor(Date.now() / 1000) - 60,
+        },
+      ],
+    });
+
+    const monitor = await monitorZulipProvider({
+      config: {} as never,
+      runtime: {
+        log: vi.fn(),
+        error: vi.fn(),
+        exit: vi.fn(),
+      },
+    });
+
+    await waitForCondition(() => dispatchReplyFromConfig.mock.calls.length > 0);
+
+    const firstCall = getDispatchCall(dispatchReplyFromConfig, 0) as
+      | { ctx?: { ThreadContext?: string; ThreadContextMessages?: Array<{ id: number }> } }
+      | undefined;
+    if (!firstCall) {
+      throw new Error("expected first dispatch call");
+    }
+
+    expect(firstCall.ctx?.ThreadContext).toContain("earlier context one");
+    expect(firstCall.ctx?.ThreadContext).toContain("earlier context two");
+    expect(firstCall.ctx?.ThreadContextMessages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 9098 }),
+        expect.objectContaining({ id: 9099 }),
+      ]),
+    );
+
+    expect(mocks.zulipRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: "/api/v1/messages",
+        query: expect.objectContaining({
+          narrow: expect.stringContaining('"topic","general"'),
+        }),
+      }),
+    );
+
+    monitor.stop();
+    await (monitor as { done: Promise<void> }).done;
+  });
+
+  it("keeps bounded per-channel thread history in dispatch context", async () => {
+    const events: ZulipEventMessage[] = Array.from({ length: 15 }, (_, index) => ({
+      id: 9200 + index,
+      type: "stream",
+      sender_id: 55,
+      sender_full_name: "Tester",
+      display_recipient: "marcel",
+      stream_id: 42,
+      subject: "general",
+      content: `message-${index}`,
+      timestamp: Math.floor(Date.now() / 1000) + index,
+    }));
+
+    const { dispatchReplyFromConfig } = createHarness({ events });
+
+    const monitor = await monitorZulipProvider({
+      config: {} as never,
+      runtime: {
+        log: vi.fn(),
+        error: vi.fn(),
+        exit: vi.fn(),
+      },
+    });
+
+    await waitForCondition(() => dispatchReplyFromConfig.mock.calls.length >= 15, 5_000);
+
+    const calls = dispatchReplyFromConfig.mock.calls as unknown as Array<[unknown]>;
+    const finalCallEntry = calls.find(
+      ([payload]) =>
+        (payload as { ctx?: { MessageSid?: string } }).ctx?.MessageSid === String(events[14].id),
+    );
+    const finalCall = (finalCallEntry?.[0] as
+      | {
+          ctx?: {
+            ThreadContext?: string;
+            ThreadContextMessages?: Array<{ id: number; text?: string }>;
+          };
+        }
+      | undefined);
+    if (!finalCall) {
+      throw new Error("expected final dispatch call");
+    }
+
+    const threadMessages = finalCall.ctx?.ThreadContextMessages ?? [];
+    expect(threadMessages.length).toBeGreaterThan(0);
+    expect(threadMessages.length).toBeLessThanOrEqual(8);
+    expect(finalCall.ctx?.ThreadContext).toContain("message-13");
+    expect(finalCall.ctx?.ThreadContext).not.toContain("message-0");
+
+    monitor.stop();
+    await (monitor as { done: Promise<void> }).done;
+  });
+
+  it("injects stream/topic persona content before the main user message", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "zulip-persona-test-"));
+    const personaPath = path.join(tmpDir, "oncall-persona.txt");
+    await fs.writeFile(personaPath, "[persona] Respond as SRE lead.", "utf8");
+
+    try {
+      const event: ZulipEventMessage = {
+        id: 9300,
+        type: "stream",
+        sender_id: 55,
+        sender_full_name: "Tester",
+        display_recipient: "marcel",
+        stream_id: 42,
+        subject: "incidents",
+        content: "investigate latest alert",
+        timestamp: Math.floor(Date.now() / 1000),
+      };
+
+      const { dispatchReplyFromConfig } = createHarness({
+        events: [event],
+        personaRouting: [
+          {
+            stream: "marcel",
+            topic: "incidents",
+            personaFile: personaPath,
+          },
+        ],
+      });
+
+      const monitor = await monitorZulipProvider({
+        config: {} as never,
+        runtime: {
+          log: vi.fn(),
+          error: vi.fn(),
+          exit: vi.fn(),
+        },
+      });
+
+      await waitForCondition(() => dispatchReplyFromConfig.mock.calls.length > 0);
+
+      const firstCall = getDispatchCall(dispatchReplyFromConfig, 0);
+      const body = String(firstCall?.ctx?.Body ?? "");
+      expect(body).toContain("[persona] Respond as SRE lead.");
+      expect(body.indexOf("[persona] Respond as SRE lead.")).toBeLessThan(
+        body.indexOf("investigate latest alert"),
+      );
+
+      monitor.stop();
+      await (monitor as { done: Promise<void> }).done;
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("continues normally when configured persona file is missing", async () => {
+    const event: ZulipEventMessage = {
+      id: 9301,
+      type: "stream",
+      sender_id: 55,
+      sender_full_name: "Tester",
+      display_recipient: "marcel",
+      stream_id: 42,
+      subject: "incidents",
+      content: "no persona file should still dispatch",
+      timestamp: Math.floor(Date.now() / 1000),
+    };
+
+    const { dispatchReplyFromConfig } = createHarness({
+      events: [event],
+      personaRouting: [
+        {
+          stream: "marcel",
+          topic: "incidents",
+          personaFile: "/definitely/missing/persona.txt",
+        },
+      ],
+    });
+
+    const monitor = await monitorZulipProvider({
+      config: {} as never,
+      runtime: {
+        log: vi.fn(),
+        error: vi.fn(),
+        exit: vi.fn(),
+      },
+    });
+
+    await waitForCondition(() => dispatchReplyFromConfig.mock.calls.length > 0);
+
+    const firstCall = getDispatchCall(dispatchReplyFromConfig, 0);
+    expect(String(firstCall?.ctx?.Body ?? "")).toContain("no persona file should still dispatch");
+
+    monitor.stop();
+    await (monitor as { done: Promise<void> }).done;
+  });
+
+  it("prefers a stream+topic persona route over a broader stream route", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "zulip-persona-priority-"));
+    const broadPersonaPath = path.join(tmpDir, "broad.txt");
+    const specificPersonaPath = path.join(tmpDir, "specific.txt");
+    await fs.writeFile(broadPersonaPath, "[persona] Broad stream persona.", "utf8");
+    await fs.writeFile(specificPersonaPath, "[persona] Specific incident persona.", "utf8");
+
+    try {
+      const event: ZulipEventMessage = {
+        id: 9302,
+        type: "stream",
+        sender_id: 55,
+        sender_full_name: "Tester",
+        display_recipient: "marcel",
+        stream_id: 42,
+        subject: "incidents",
+        content: "investigate this one first",
+        timestamp: Math.floor(Date.now() / 1000),
+      };
+
+      const { dispatchReplyFromConfig } = createHarness({
+        events: [event],
+        personaRouting: [
+          { stream: "marcel", personaFile: broadPersonaPath },
+          { stream: "marcel", topic: "incidents", personaFile: specificPersonaPath },
+        ],
+      });
+
+      const monitor = await monitorZulipProvider({
+        config: {} as never,
+        runtime: { log: vi.fn(), error: vi.fn(), exit: vi.fn() },
+      });
+
+      await waitForCondition(() => dispatchReplyFromConfig.mock.calls.length > 0);
+
+      const firstCall = getDispatchCall(dispatchReplyFromConfig, 0);
+      const body = String(firstCall?.ctx?.Body ?? "");
+      expect(body).toContain("[persona] Specific incident persona.");
+      expect(body).not.toContain("[persona] Broad stream persona.");
+
+      monitor.stop();
+      await (monitor as { done: Promise<void> }).done;
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
 });

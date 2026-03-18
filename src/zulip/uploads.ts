@@ -7,12 +7,116 @@ import {
 } from "openclaw/plugin-sdk";
 import { getZulipRuntime } from "../runtime.js";
 import type { ZulipApiSuccess, ZulipAuth } from "./client.js";
+import { sweepExpiredMedia } from "./media-sweep.js";
 import { normalizeZulipBaseUrl } from "./normalize.js";
 
 const HTTP_URL_RE = /^https?:\/\//i;
 const USER_UPLOAD_MARKER = "/user_uploads/";
 const MB = 1024 * 1024;
 const DEFAULT_MAX_BYTES = 5 * MB;
+const DEFAULT_MEDIA_SWEEP_TTL_MS = 6 * 60 * 60 * 1000;
+
+type HeicConverter = (buffer: Buffer) => Promise<Buffer>;
+
+function isHeicLikeUpload(contentType?: string, fileName?: string): boolean {
+  const mime = (contentType ?? "").toLowerCase();
+  if (mime === "image/heic" || mime === "image/heif") {
+    return true;
+  }
+  const ext = path.extname(fileName ?? "").toLowerCase();
+  return ext === ".heic" || ext === ".heif";
+}
+
+function normalizeJpegFilename(fileName?: string): string | undefined {
+  if (!fileName) {
+    return undefined;
+  }
+  const ext = path.extname(fileName);
+  if (!ext) {
+    return `${fileName}.jpg`;
+  }
+  return fileName.slice(0, fileName.length - ext.length) + ".jpg";
+}
+
+async function loadDefaultHeicConverter(): Promise<HeicConverter> {
+  const sharpModule = (await import("sharp")) as {
+    default?: (input: Buffer) => { jpeg: (opts: { quality: number }) => { toBuffer: () => Promise<Buffer> } };
+  };
+  const sharp = sharpModule.default;
+  if (typeof sharp !== "function") {
+    throw new Error("sharp converter unavailable");
+  }
+  return async (buffer: Buffer) => await sharp(buffer).jpeg({ quality: 90 }).toBuffer();
+}
+
+function resolveMediaSweepTtlMs(params: {
+  cfg: OpenClawConfig;
+  accountId: string;
+  override?: number;
+}): number {
+  if (typeof params.override === "number" && Number.isFinite(params.override)) {
+    return Math.max(0, Math.floor(params.override));
+  }
+
+  const zulipCfg = params.cfg.channels?.zulip as
+    | {
+        mediaSweepTtlMs?: unknown;
+        accounts?: Record<string, { mediaSweepTtlMs?: unknown }>;
+      }
+    | undefined;
+
+  const accountValue = zulipCfg?.accounts?.[params.accountId]?.mediaSweepTtlMs;
+  if (typeof accountValue === "number" && Number.isFinite(accountValue)) {
+    return Math.max(0, Math.floor(accountValue));
+  }
+  const globalValue = zulipCfg?.mediaSweepTtlMs;
+  if (typeof globalValue === "number" && Number.isFinite(globalValue)) {
+    return Math.max(0, Math.floor(globalValue));
+  }
+  return DEFAULT_MEDIA_SWEEP_TTL_MS;
+}
+
+async function normalizeInboundUpload(params: {
+  buffer: Buffer;
+  contentType?: string;
+  fileName?: string;
+  heicConverter?: HeicConverter;
+  onSkipConversion?: (reason: string) => void;
+}): Promise<{ buffer: Buffer; contentType?: string; fileName?: string }> {
+  if (!isHeicLikeUpload(params.contentType, params.fileName)) {
+    return {
+      buffer: params.buffer,
+      contentType: params.contentType,
+      fileName: params.fileName,
+    };
+  }
+
+  const converter = params.heicConverter ?? (await loadDefaultHeicConverter().catch(() => null));
+  if (!converter) {
+    params.onSkipConversion?.("converter is not available");
+    return {
+      buffer: params.buffer,
+      contentType: params.contentType,
+      fileName: params.fileName,
+    };
+  }
+
+  try {
+    const converted = await converter(params.buffer);
+    return {
+      buffer: converted,
+      contentType: "image/jpeg",
+      fileName: normalizeJpegFilename(params.fileName),
+    };
+  } catch {
+    params.onSkipConversion?.("converter failed at runtime");
+    return {
+      buffer: params.buffer,
+      contentType: params.contentType,
+      fileName: params.fileName,
+    };
+  }
+}
 
 function resolveLocalMediaPath(source: string): string {
   if (!source.startsWith("file://")) {
@@ -168,6 +272,9 @@ export async function downloadZulipUploads(params: {
   content: string;
   abortSignal?: AbortSignal;
   maxFiles?: number;
+  heicConverter?: HeicConverter;
+  mediaSweepTtlMs?: number;
+  mediaSweepNowMs?: number;
 }): Promise<ZulipInboundUpload[]> {
   const core = getZulipRuntime();
 
@@ -185,12 +292,19 @@ export async function downloadZulipUploads(params: {
   }
   const maxFiles = Math.max(0, Math.floor(params.maxFiles ?? 3));
   const limited = maxFiles > 0 ? urls.slice(0, maxFiles) : urls;
+  const sweepTtlMs = resolveMediaSweepTtlMs({
+    cfg: params.cfg,
+    accountId: params.accountId,
+    override: params.mediaSweepTtlMs,
+  });
 
   const base = normalizeZulipBaseUrl(params.auth.baseUrl);
   const baseOrigin = base ? new URL(base).origin : undefined;
   const fetchImpl = buildZulipAuthFetch({ auth: params.auth, includeAuthForOrigin: baseOrigin });
+  const logger = core.logging?.getChildLogger?.({ module: "zulip" });
 
   const out: ZulipInboundUpload[] = [];
+  const mediaDirs = new Set<string>();
   for (const url of limited) {
     try {
       const fetched = await core.channel.media.fetchRemoteMedia({
@@ -198,24 +312,45 @@ export async function downloadZulipUploads(params: {
         fetchImpl,
         maxBytes,
       });
+      const normalized = await normalizeInboundUpload({
+        buffer: fetched.buffer,
+        contentType: fetched.contentType,
+        fileName: fetched.fileName ?? resolveFilenameFromUrl(url),
+        heicConverter: params.heicConverter,
+        onSkipConversion: (reason) => {
+          logger?.debug?.(`inbound HEIC conversion skipped for ${url}: ${reason}`);
+        },
+      });
       const saved = await core.channel.media.saveMediaBuffer(
-        fetched.buffer,
-        fetched.contentType,
+        normalized.buffer,
+        normalized.contentType,
         "inbound",
         maxBytes,
-        fetched.fileName ?? resolveFilenameFromUrl(url),
+        normalized.fileName,
       );
-      const label = fetched.fileName ?? resolveFilenameFromUrl(url);
+      mediaDirs.add(path.dirname(saved.path));
+      const label = normalized.fileName ?? resolveFilenameFromUrl(url);
       out.push({
         url,
         path: saved.path,
-        contentType: saved.contentType ?? fetched.contentType,
+        contentType: saved.contentType ?? normalized.contentType,
         placeholder: label ? `[Zulip upload: ${label}]` : "[Zulip upload]",
       });
     } catch {
       // Ignore download errors (auth, size, redirects, etc). The original URL is still present in text.
     }
   }
+
+  if (sweepTtlMs > 0) {
+    for (const mediaDir of mediaDirs) {
+      await sweepExpiredMedia({
+        directory: mediaDir,
+        ttlMs: sweepTtlMs,
+        nowMs: params.mediaSweepNowMs,
+      }).catch(() => undefined);
+    }
+  }
+
   return out;
 }
 

@@ -13,6 +13,8 @@ import {
   deleteZulipMessage,
   deleteZulipStream,
   editZulipMessage,
+  forwardZulipMessage,
+  fetchZulipMessageEditHistory,
   fetchZulipMemberInfo,
   fetchZulipMessages,
   fetchZulipServerSettings,
@@ -21,6 +23,7 @@ import {
   fetchZulipUserPresence,
   inviteZulipUsersToStream,
   normalizeZulipBaseUrl,
+  renderZulipMarkdownPreview,
   reactivateZulipUser,
   removeZulipReactionViaClient,
   resolveZulipStreamId,
@@ -46,6 +49,9 @@ const SAFE_REALM_SETTINGS = [
   "signup_notifications_stream_id",
   "message_retention_days",
 ];
+const CHANNEL_MUTATION_ACTIONS = ["channel-create", "channel-edit", "channel-delete"] as const;
+
+type ChannelMutationAction = (typeof CHANNEL_MUTATION_ACTIONS)[number];
 
 type StreamTarget = {
   stream: string;
@@ -80,6 +86,26 @@ function resolveZulipClient(cfg: OpenClawConfig, accountId?: string | null) {
 function requireAdminActionsEnabled(account: ReturnType<typeof resolveZulipAccount>): void {
   if (!account.enableAdminActions) {
     throw new Error("Admin actions require enableAdminActions: true in Zulip config");
+  }
+}
+
+function isChannelMutationAction(action: string): action is ChannelMutationAction {
+  return (CHANNEL_MUTATION_ACTIONS as readonly string[]).includes(action);
+}
+
+function isChannelMutationActionEnabled(
+  account: ReturnType<typeof resolveZulipAccount>,
+  action: ChannelMutationAction,
+): boolean {
+  return account.config.actions?.[action] === true;
+}
+
+function requireChannelMutationActionEnabled(
+  account: ReturnType<typeof resolveZulipAccount>,
+  action: ChannelMutationAction,
+): void {
+  if (!isChannelMutationActionEnabled(account, action)) {
+    throw new Error(`Action ${action} is not enabled for Zulip account "${account.accountId}".`);
   }
 }
 
@@ -411,10 +437,8 @@ function readRealmUpdateParams(
 
 export const zulipMessageActions: ChannelMessageActionAdapter = {
   listActions: ({ cfg }) => {
-    const accounts = [resolveZulipAccount({ cfg })].filter((account) =>
-      Boolean(account.apiKey && account.email && account.baseUrl),
-    );
-    if (accounts.length === 0) {
+    const account = resolveZulipAccount({ cfg });
+    if (!account.apiKey || !account.email || !account.baseUrl) {
       return [];
     }
     const actions = new Set<ChannelMessageActionName>([
@@ -422,17 +446,22 @@ export const zulipMessageActions: ChannelMessageActionAdapter = {
       "poll",
       "read",
       "channel-list",
-      "channel-create",
-      "channel-edit",
-      "channel-delete",
       "react",
       "edit",
       "delete",
+      "forward" as ChannelMessageActionName,
+      "render" as ChannelMessageActionName,
       "search",
       "member-info",
       "pin",
       "unpin",
     ]);
+    actions.add("history" as ChannelMessageActionName);
+    for (const action of CHANNEL_MUTATION_ACTIONS) {
+      if (isChannelMutationActionEnabled(account, action)) {
+        actions.add(action as ChannelMessageActionName);
+      }
+    }
     // TODO: These actions require core SDK changes to MESSAGE_ACTION_TARGET_MODE.
     // Re-enable once the SDK supports plugin-registered action target modes.
     // See: https://github.com/openclaw/openclaw/issues/TBD
@@ -460,6 +489,10 @@ export const zulipMessageActions: ChannelMessageActionAdapter = {
   },
   handleAction: async ({ action, params, cfg, accountId, toolContext }) => {
     const { client, account } = resolveZulipClient(cfg, accountId ?? undefined);
+
+    if (isChannelMutationAction(action)) {
+      requireChannelMutationActionEnabled(account, action);
+    }
 
     if (action === "send") {
       const to = readStringParam(params, "to", { required: true });
@@ -837,6 +870,27 @@ export const zulipMessageActions: ChannelMessageActionAdapter = {
       return jsonResult({ ok: true, deleted: messageId });
     }
 
+    if ((action as string) === "forward") {
+      const messageId = readMessageId(params);
+      const to = readStringParam(params, "to", { required: true });
+      const topic = readStringParam(params, "topic");
+      const forwarded = await forwardZulipMessage(client, { messageId, to, topic: topic ?? undefined });
+      return jsonResult({ ok: true, messageId, to, ...(topic ? { topic } : {}), forwarded: forwarded.id });
+    }
+
+    if ((action as string) === "render") {
+      const content =
+        readStringParam(params, "content", { allowEmpty: true }) ??
+        readStringParam(params, "message", { allowEmpty: true }) ??
+        readStringParam(params, "text", { allowEmpty: true });
+      if (content === undefined) {
+        throw new Error("content is required for Zulip render actions.");
+      }
+      assertStringLength(content, "content", MAX_STRING_LENGTH);
+      const rendered = await renderZulipMarkdownPreview(client, { content });
+      return jsonResult({ ok: true, rendered: rendered.rendered });
+    }
+
     if (action === "pin" || action === "unpin") {
       const messageId = readMessageId(params);
       // Convert messageId to integer for API call
@@ -928,12 +982,18 @@ export const zulipMessageActions: ChannelMessageActionAdapter = {
         readStringParam(params, "channelId") ??
         readStringParam(params, "to");
       const explicitTopic = readStringParam(params, "topic");
+      const dmWithValues = parseStringArrayParam(params, "dmWith")
+        ?.map((value) => String(value).trim())
+        .filter((value) => value.length > 0);
+      const isDirect = readBooleanParam(params, "isDirect", "dm", "direct");
       const limit = readNumberParam(params, "limit", { integer: true });
       const target = rawStream ? splitStreamTarget(rawStream) : undefined;
       const messages = await searchZulipMessages(client, {
         query,
         stream: target?.stream,
         topic: explicitTopic ?? target?.topic,
+        dmWith: dmWithValues && dmWithValues.length > 0 ? dmWithValues : undefined,
+        isDirect,
         limit: limit ?? undefined,
       });
       return jsonResult({
@@ -941,8 +1001,16 @@ export const zulipMessageActions: ChannelMessageActionAdapter = {
         query,
         ...(target?.stream ? { stream: target.stream } : {}),
         ...(explicitTopic || target?.topic ? { topic: explicitTopic ?? target?.topic } : {}),
+        ...(dmWithValues && dmWithValues.length > 0 ? { dmWith: dmWithValues } : {}),
+        ...(isDirect !== undefined ? { isDirect } : {}),
         messages,
       });
+    }
+
+    if ((action as string) === "history") {
+      const messageId = readMessageId(params);
+      const history = await fetchZulipMessageEditHistory(client, messageId);
+      return jsonResult({ ok: true, messageId, history });
     }
 
     throw new Error(`Action ${action} is not supported for provider ${providerId}.`);

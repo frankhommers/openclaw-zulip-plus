@@ -20,6 +20,10 @@ const mocks = vi.hoisted(() => ({
   prepareZulipCheckpointForRecovery: vi.fn(),
   markZulipCheckpointFailure: vi.fn(),
   buildZulipCheckpointId: vi.fn(),
+  loadZulipProcessedMessageState: vi.fn(),
+  writeZulipProcessedMessageState: vi.fn(),
+  isZulipMessageProcessed: vi.fn(),
+  markZulipMessageProcessed: vi.fn(),
 }));
 
 vi.mock("openclaw/plugin-sdk", async (importOriginal) => {
@@ -75,6 +79,13 @@ vi.mock("./inflight-checkpoints.js", () => ({
   buildZulipCheckpointId: mocks.buildZulipCheckpointId,
 }));
 
+vi.mock("./processed-message-state.js", () => ({
+  loadZulipProcessedMessageState: mocks.loadZulipProcessedMessageState,
+  writeZulipProcessedMessageState: mocks.writeZulipProcessedMessageState,
+  isZulipMessageProcessed: mocks.isZulipMessageProcessed,
+  markZulipMessageProcessed: mocks.markZulipMessageProcessed,
+}));
+
 import { monitorZulipProvider } from "./monitor.js";
 
 type ZulipEventMessage = {
@@ -94,10 +105,13 @@ type ZulipQueueEvent = {
   id: number;
   type?: string;
   message?: ZulipEventMessage;
+  stream_id?: number;
+  orig_stream_id?: number;
   subject?: string;
   orig_subject?: string;
   topic?: string;
   orig_topic?: string;
+  subscriptions?: Array<{ stream_id?: number; name?: string }>;
 };
 
 type ContextPayload = {
@@ -122,6 +136,11 @@ function waitForCondition(condition: () => boolean, timeoutMs = 1_500): Promise<
     };
     tick();
   });
+}
+
+function getDispatchContexts(dispatchReplyFromConfig: ReturnType<typeof vi.fn>): ContextPayload[] {
+  const calls = dispatchReplyFromConfig.mock.calls as Array<[unknown]>;
+  return calls.map((call) => (call[0] as { ctx: ContextPayload }).ctx);
 }
 
 function createHarness(events: ZulipQueueEvent[]) {
@@ -184,20 +203,54 @@ function createHarness(events: ZulipQueueEvent[]) {
 
   mocks.resolveZulipAccount.mockReturnValue({
     accountId: "default",
+    enabled: true,
     baseUrl: "https://zulip.example.com",
     email: "bot@zulip.example.com",
     apiKey: "api-key",
-    streams: ["marcel"],
+    streams: ["marcel", "ops"],
     defaultTopic: "general",
     alwaysReply: true,
+    requireMention: false,
+    allowBotIds: [],
+    botLoopPrevention: {
+      maxChainLength: 3,
+      cooldownMs: 30_000,
+    },
     textChunkLimit: 10_000,
+    workingMessages: {
+      enabled: false,
+    },
+    processingSpinner: {
+      enabled: false,
+      emoji: [],
+      intervalMs: 10_000,
+    },
     reactions: {
       enabled: false,
       onStart: "eyes",
       onSuccess: "check",
       onFailure: "warning",
       clearOnFinish: true,
+      genericCallback: {
+        enabled: false,
+        includeRemoveOps: false,
+      },
+      workflow: {
+        enabled: false,
+        replaceStageReaction: false,
+        minTransitionMs: 0,
+        stages: {
+          queued: "",
+          processing: "",
+          toolRunning: "",
+          retrying: "",
+          success: "check",
+          partialSuccess: "warning",
+          failure: "warning",
+        },
+      },
     },
+    config: {},
   });
 
   mocks.buildZulipQueuePlan.mockReturnValue([{ stream: "marcel" }]);
@@ -225,6 +278,10 @@ function createHarness(events: ZulipQueueEvent[]) {
     ({ accountId, messageId }: { accountId: string; messageId: number }) =>
       `${accountId}:${messageId}`,
   );
+  mocks.loadZulipProcessedMessageState.mockResolvedValue({ version: 1, watermarks: {} });
+  mocks.writeZulipProcessedMessageState.mockResolvedValue(undefined);
+  mocks.isZulipMessageProcessed.mockReturnValue(false);
+  mocks.markZulipMessageProcessed.mockReturnValue(true);
 
   let pollCount = 0;
   mocks.zulipRequest.mockImplementation(
@@ -241,6 +298,15 @@ function createHarness(events: ZulipQueueEvent[]) {
     }) => {
       if (path === "/api/v1/users/me") {
         return { result: "success", user_id: 9 };
+      }
+      if (path === "/api/v1/users/me/subscriptions") {
+        return {
+          result: "success",
+          subscriptions: [
+            { stream_id: 42, name: "marcel" },
+            { stream_id: 43, name: "ops" },
+          ],
+        };
       }
       if (path === "/api/v1/register") {
         registerForms.push(form ?? {});
@@ -277,14 +343,19 @@ function createHarness(events: ZulipQueueEvent[]) {
   return { dispatchReplyFromConfig, registerForms };
 }
 
-function makeMessage(messageId: number, topic: string): ZulipEventMessage {
+function makeMessage(
+  messageId: number,
+  topic: string,
+  stream = "marcel",
+  streamId = 42,
+): ZulipEventMessage {
   return {
     id: messageId,
     type: "stream",
     sender_id: 55,
     sender_full_name: "Tester",
-    display_recipient: "marcel",
-    stream_id: 42,
+    display_recipient: stream,
+    stream_id: streamId,
     subject: topic,
     content: "hello",
     timestamp: Math.floor(Date.now() / 1000),
@@ -325,8 +396,8 @@ describe("monitorZulipProvider topic rename session continuity", () => {
     const eventTypes = JSON.parse(String(registerForm?.event_types ?? "[]")) as string[];
     expect(eventTypes).toContain("update_message");
 
-    const ctx = (dispatchReplyFromConfig.mock.calls[0]?.[0] as { ctx: ContextPayload }).ctx;
-    expect(ctx.SessionKey).toBe("session-key:topic:alpha");
+    const [ctx] = getDispatchContexts(dispatchReplyFromConfig);
+    expect(ctx.SessionKey).toBe("session-key:topic:marcel:alpha");
     expect(ctx.To).toBe("stream:marcel#beta");
 
     monitor.stop();
@@ -337,7 +408,7 @@ describe("monitorZulipProvider topic rename session continuity", () => {
     const { dispatchReplyFromConfig } = createHarness([
       {
         id: 101,
-        message: makeMessage(9001, "alpha"),
+        message: makeMessage(9011, "alpha"),
       },
       {
         id: 102,
@@ -347,7 +418,7 @@ describe("monitorZulipProvider topic rename session continuity", () => {
       },
       {
         id: 103,
-        message: makeMessage(9002, "beta"),
+        message: makeMessage(9012, "beta"),
       },
     ]);
 
@@ -362,14 +433,12 @@ describe("monitorZulipProvider topic rename session continuity", () => {
 
     await waitForCondition(() => dispatchReplyFromConfig.mock.calls.length >= 2);
 
-    const contexts = dispatchReplyFromConfig.mock.calls.map(
-      ([arg]) => (arg as { ctx: ContextPayload }).ctx,
-    );
-    const first = contexts.find((ctx) => ctx.MessageSid === "9001");
-    const second = contexts.find((ctx) => ctx.MessageSid === "9002");
+    const contexts = getDispatchContexts(dispatchReplyFromConfig);
+    const first = contexts.find((ctx) => ctx.MessageSid === "9011");
+    const second = contexts.find((ctx) => ctx.MessageSid === "9012");
 
-    expect(first?.SessionKey).toBe("session-key:topic:alpha");
-    expect(second?.SessionKey).toBe("session-key:topic:alpha");
+    expect(first?.SessionKey).toBe("session-key:topic:marcel:alpha");
+    expect(second?.SessionKey).toBe("session-key:topic:marcel:alpha");
     expect(second?.To).toBe("stream:marcel#beta");
 
     monitor.stop();
@@ -407,8 +476,8 @@ describe("monitorZulipProvider topic rename session continuity", () => {
 
     await waitForCondition(() => dispatchReplyFromConfig.mock.calls.length >= 1);
 
-    const ctx = (dispatchReplyFromConfig.mock.calls[0]?.[0] as { ctx: ContextPayload }).ctx;
-    expect(ctx.SessionKey).toBe("session-key:topic:alpha");
+    const [ctx] = getDispatchContexts(dispatchReplyFromConfig);
+    expect(ctx.SessionKey).toBe("session-key:topic:marcel:alpha");
     expect(ctx.To).toBe("stream:marcel#gamma");
 
     monitor.stop();
@@ -445,8 +514,51 @@ describe("monitorZulipProvider topic rename session continuity", () => {
 
     await waitForCondition(() => dispatchReplyFromConfig.mock.calls.length >= 1);
 
-    const ctx = (dispatchReplyFromConfig.mock.calls[0]?.[0] as { ctx: ContextPayload }).ctx;
-    expect(ctx.SessionKey).toBe("session-key:topic:beta");
+    const [ctx] = getDispatchContexts(dispatchReplyFromConfig);
+    expect(ctx.SessionKey).toBe("session-key:topic:marcel:beta");
+
+    monitor.stop();
+    await (monitor as { done: Promise<void> }).done;
+  });
+
+  it("keeps session continuity when a topic moves across streams", async () => {
+    const { dispatchReplyFromConfig } = createHarness([
+      {
+        id: 101,
+        message: makeMessage(9101, "alpha", "marcel", 42),
+      },
+      {
+        id: 102,
+        type: "update_message",
+        orig_stream_id: 42,
+        stream_id: 43,
+        orig_topic: "alpha",
+        topic: "beta",
+      },
+      {
+        id: 103,
+        message: makeMessage(9102, "beta", "ops", 43),
+      },
+    ]);
+
+    const monitor = await monitorZulipProvider({
+      config: {} as never,
+      runtime: {
+        log: vi.fn(),
+        error: vi.fn(),
+        exit: vi.fn(),
+      },
+    });
+
+    await waitForCondition(() => dispatchReplyFromConfig.mock.calls.length >= 2);
+
+    const contexts = getDispatchContexts(dispatchReplyFromConfig);
+    const first = contexts.find((ctx) => ctx.MessageSid === "9101");
+    const second = contexts.find((ctx) => ctx.MessageSid === "9102");
+
+    expect(first?.SessionKey).toBe("session-key:topic:marcel:alpha");
+    expect(second?.SessionKey).toBe("session-key:topic:marcel:alpha");
+    expect(second?.To).toBe("stream:ops#beta");
 
     monitor.stop();
     await (monitor as { done: Promise<void> }).done;

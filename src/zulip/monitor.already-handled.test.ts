@@ -1,5 +1,18 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { vi, describe, expect, it } from "vitest";
-import { isBotAlreadyHandled } from "./monitor.js";
+import {
+  evaluateAllowedBotChain,
+  isBotAlreadyHandled,
+  resolveBotSenderClassification,
+} from "./monitor.js";
+import {
+  isZulipMessageProcessed,
+  loadZulipProcessedMessageState,
+  markZulipMessageProcessed,
+  writeZulipProcessedMessageState,
+} from "./processed-message-state.js";
 
 const BOT_USER_ID = 42;
 const SUCCESS_EMOJI = "check";
@@ -53,7 +66,7 @@ describe("isBotAlreadyHandled", () => {
         makeParams({ message: msg, fetchMessage }),
       );
 
-      expect(result).toEqual({ handled: true, reason: "bot-completion-reaction" });
+      expect(result).toEqual({ handled: true, reason: "bot-completion-reaction", completion: "success" });
       // Should NOT call fetchMessage since reactions were inline
       expect(fetchMessage).not.toHaveBeenCalled();
     });
@@ -65,7 +78,7 @@ describe("isBotAlreadyHandled", () => {
 
       const result = await isBotAlreadyHandled(makeParams({ message: msg }));
 
-      expect(result).toEqual({ handled: true, reason: "bot-completion-reaction" });
+      expect(result).toEqual({ handled: true, reason: "bot-completion-reaction", completion: "failure" });
     });
 
     it("ignores reactions from other users", async () => {
@@ -105,7 +118,7 @@ describe("isBotAlreadyHandled", () => {
       );
 
       expect(fetchMessage).toHaveBeenCalledWith(100);
-      expect(result).toEqual({ handled: true, reason: "bot-completion-reaction" });
+      expect(result).toEqual({ handled: true, reason: "bot-completion-reaction", completion: "success" });
     });
 
     it("proceeds to last-sender check when fetched message has no bot reaction", async () => {
@@ -230,7 +243,7 @@ describe("isBotAlreadyHandled", () => {
       );
 
       // Should return reaction reason (check 1), not last-sender (check 2)
-      expect(result).toEqual({ handled: true, reason: "bot-completion-reaction" });
+      expect(result).toEqual({ handled: true, reason: "bot-completion-reaction", completion: "success" });
       // Should NOT even call fetchNewestInTopic since check 1 was conclusive
       expect(fetchNewestInTopic).not.toHaveBeenCalled();
     });
@@ -298,5 +311,232 @@ describe("isBotAlreadyHandled", () => {
 
       expect(result).toEqual({ handled: false });
     });
+  });
+});
+
+describe("processed message watermark state", () => {
+  it("persists processed stream watermarks to disk", async () => {
+    const stateFilePath = path.join(
+      os.tmpdir(),
+      `zulip-processed-state-${Date.now()}-${Math.random().toString(16).slice(2)}.json`,
+    );
+
+    try {
+      const state = await loadZulipProcessedMessageState({ stateFilePath });
+      expect(
+        isZulipMessageProcessed({
+          state,
+          stream: "marcel",
+          messageId: 100,
+        }),
+      ).toBe(false);
+
+      expect(
+        markZulipMessageProcessed({
+          state,
+          stream: "marcel",
+          messageId: 100,
+        }),
+      ).toBe(true);
+      await writeZulipProcessedMessageState({ state, stateFilePath });
+
+      const reloaded = await loadZulipProcessedMessageState({ stateFilePath });
+      expect(
+        isZulipMessageProcessed({
+          state: reloaded,
+          stream: "marcel",
+          messageId: 100,
+        }),
+      ).toBe(true);
+      expect(
+        isZulipMessageProcessed({
+          state: reloaded,
+          stream: "marcel",
+          messageId: 101,
+        }),
+      ).toBe(false);
+    } finally {
+      await fs.rm(stateFilePath, { force: true });
+    }
+  });
+
+  it("does not treat missing earlier messages as processed when later ones completed first", async () => {
+    const state = await loadZulipProcessedMessageState();
+
+    expect(
+      markZulipMessageProcessed({
+        state,
+        stream: "marcel",
+        messageId: 101,
+      }),
+    ).toBe(true);
+
+    expect(
+      isZulipMessageProcessed({
+        state,
+        stream: "marcel",
+        messageId: 100,
+      }),
+    ).toBe(false);
+    expect(
+      isZulipMessageProcessed({
+        state,
+        stream: "marcel",
+        messageId: 101,
+      }),
+    ).toBe(true);
+
+    expect(
+      markZulipMessageProcessed({
+        state,
+        stream: "marcel",
+        messageId: 100,
+      }),
+    ).toBe(true);
+
+    expect(
+      isZulipMessageProcessed({
+        state,
+        stream: "marcel",
+        messageId: 100,
+      }),
+    ).toBe(true);
+    expect(
+      isZulipMessageProcessed({
+        state,
+        stream: "marcel",
+        messageId: 101,
+      }),
+    ).toBe(true);
+  });
+});
+
+describe("resolveBotSenderClassification", () => {
+  it("classifies self messages as self", () => {
+    const result = resolveBotSenderClassification({
+      message: makeMessage(10, { sender_id: 42 }),
+      botUserId: 42,
+      allowBotIds: new Set([77]),
+    });
+
+    expect(result).toBe("self");
+  });
+
+  it("classifies allowlisted bot IDs as allowed-bot", () => {
+    const result = resolveBotSenderClassification({
+      message: makeMessage(10, { sender_id: 77 }),
+      botUserId: 42,
+      allowBotIds: new Set([77]),
+    });
+
+    expect(result).toBe("allowed-bot");
+  });
+
+  it("classifies non-allowlisted bot senders as other-bot", () => {
+    const result = resolveBotSenderClassification({
+      message: {
+        ...makeMessage(10, { sender_id: 88 }),
+        sender_email: "helper-bot@example.com",
+      },
+      botUserId: 42,
+      allowBotIds: new Set([77]),
+    });
+
+    expect(result).toBe("other-bot");
+  });
+
+  it("classifies regular human senders as human", () => {
+    const result = resolveBotSenderClassification({
+      message: {
+        ...makeMessage(10, { sender_id: 91 }),
+        sender_email: "human@example.com",
+        sender_full_name: "Human User",
+      },
+      botUserId: 42,
+      allowBotIds: new Set([77]),
+    });
+
+    expect(result).toBe("human");
+  });
+});
+
+describe("evaluateAllowedBotChain", () => {
+  it("increments depth for allowlisted bots within cooldown", () => {
+    const chainStateByThread = new Map<string, { depth: number; lastMessageAtMs: number; startedAtMs: number }>();
+
+    const first = evaluateAllowedBotChain({
+      chainStateByThread,
+      threadKey: "stream:ops#alerts",
+      nowMs: 1_000,
+      maxChainLength: 3,
+      cooldownMs: 60_000,
+    });
+    const second = evaluateAllowedBotChain({
+      chainStateByThread,
+      threadKey: "stream:ops#alerts",
+      nowMs: 2_000,
+      maxChainLength: 3,
+      cooldownMs: 60_000,
+    });
+
+    expect(first).toMatchObject({ allow: true, depth: 1 });
+    expect(second).toMatchObject({ allow: true, depth: 2 });
+  });
+
+  it("blocks loops once max chain length is exceeded", () => {
+    const chainStateByThread = new Map<string, { depth: number; lastMessageAtMs: number; startedAtMs: number }>();
+
+    evaluateAllowedBotChain({
+      chainStateByThread,
+      threadKey: "stream:ops#alerts",
+      nowMs: 1_000,
+      maxChainLength: 2,
+      cooldownMs: 60_000,
+    });
+    evaluateAllowedBotChain({
+      chainStateByThread,
+      threadKey: "stream:ops#alerts",
+      nowMs: 2_000,
+      maxChainLength: 2,
+      cooldownMs: 60_000,
+    });
+    const third = evaluateAllowedBotChain({
+      chainStateByThread,
+      threadKey: "stream:ops#alerts",
+      nowMs: 3_000,
+      maxChainLength: 2,
+      cooldownMs: 60_000,
+    });
+
+    expect(third).toMatchObject({ allow: false, reason: "max-chain-length", depth: 3 });
+  });
+
+  it("resets chain depth after cooldown elapses", () => {
+    const chainStateByThread = new Map<string, { depth: number; lastMessageAtMs: number; startedAtMs: number }>();
+
+    evaluateAllowedBotChain({
+      chainStateByThread,
+      threadKey: "stream:ops#alerts",
+      nowMs: 1_000,
+      maxChainLength: 2,
+      cooldownMs: 5_000,
+    });
+    evaluateAllowedBotChain({
+      chainStateByThread,
+      threadKey: "stream:ops#alerts",
+      nowMs: 2_000,
+      maxChainLength: 2,
+      cooldownMs: 5_000,
+    });
+
+    const afterCooldown = evaluateAllowedBotChain({
+      chainStateByThread,
+      threadKey: "stream:ops#alerts",
+      nowMs: 20_000,
+      maxChainLength: 2,
+      cooldownMs: 5_000,
+    });
+
+    expect(afterCooldown).toMatchObject({ allow: true, depth: 1 });
   });
 });

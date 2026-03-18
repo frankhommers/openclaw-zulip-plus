@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { unlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import type { OpenClawConfig, OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
@@ -105,6 +106,17 @@ function asNumberArray(value: unknown): number[] | undefined {
   return nums;
 }
 
+function requirePositiveIntArray(value: unknown, fieldName: string): number[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(`${fieldName} must contain at least 1 positive user id for direct typing`);
+  }
+  const normalized = value.map((entry) => asNumber(entry));
+  if (normalized.some((entry) => entry == null || !Number.isFinite(entry) || entry <= 0)) {
+    throw new Error(`${fieldName} must contain only positive numeric user ids for direct typing`);
+  }
+  return [...new Set(normalized.map((entry) => Math.trunc(entry as number)))];
+}
+
 function asStringArray(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) {
     return undefined;
@@ -128,12 +140,129 @@ function parseDateToEpochSeconds(input: string): number {
   return ts;
 }
 
+function requirePositiveInt(value: unknown, fieldName: string): number {
+  const parsed = asNumber(value);
+  if (parsed == null) {
+    throw new Error(`${fieldName} is required`);
+  }
+  if (parsed <= 0) {
+    throw new Error(`${fieldName} must be a positive number`);
+  }
+  return Math.trunc(parsed);
+}
+
+function requirePositiveIntegerNumber(value: unknown, fieldName: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`${fieldName} is required`);
+  }
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`${fieldName} must be a positive integer`);
+  }
+  return value;
+}
+
+function requirePositiveIntegerArray(value: unknown, fieldName: string): number[] | undefined {
+  if (value == null) {
+    return undefined;
+  }
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(`${fieldName} must contain at least 1 positive integer`);
+  }
+  const out: number[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "number" || !Number.isFinite(entry) || !Number.isInteger(entry) || entry <= 0) {
+      throw new Error(`${fieldName} must contain only positive integers`);
+    }
+    out.push(entry);
+  }
+  return [...new Set(out)];
+}
+
+function requireInviteAs(value: unknown): 100 | 200 | 300 | 400 | 600 {
+  const role = requirePositiveIntegerNumber(value, "inviteAs");
+  if (role !== 100 && role !== 200 && role !== 300 && role !== 400 && role !== 600) {
+    throw new Error("inviteAs must be one of 100, 200, 300, 400, or 600");
+  }
+  return role;
+}
+
+function requireProfileDataUpdates(
+  value: unknown,
+): Array<{
+  id: number;
+  value: string;
+}> {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error("data must contain at least one profile field update");
+  }
+  return value.map((entry) => {
+    if (!entry || typeof entry !== "object") {
+      throw new Error("data entries must include numeric id and string value");
+    }
+    const row = entry as Record<string, unknown>;
+    const id = asNumber(row.id);
+    if (id == null || !Number.isFinite(id) || id <= 0) {
+      throw new Error("data entries must include numeric id and string value");
+    }
+    if (typeof row.value !== "string") {
+      throw new Error("data entries must include numeric id and string value");
+    }
+    return {
+      id: Math.trunc(id),
+      value: row.value,
+    };
+  });
+}
+
+function loadZulipEnv(): void {
+  const envFilePaths = [
+    join(homedir(), ".openclaw", "secrets", "zulip.env"),
+    join(homedir(), ".openclaw", "zulip.env"),
+  ];
+
+  for (const envFilePath of envFilePaths) {
+    if (!existsSync(envFilePath)) {
+      continue;
+    }
+
+    let fileContents: string;
+    try {
+      fileContents = readFileSync(envFilePath, "utf8");
+    } catch {
+      continue;
+    }
+
+    for (const line of fileContents.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) {
+        continue;
+      }
+
+      const separator = trimmed.indexOf("=");
+      if (separator <= 0) {
+        continue;
+      }
+
+      const key = trimmed.slice(0, separator).trim();
+      const value = trimmed.slice(separator + 1).trim();
+      if (!key || process.env[key] !== undefined) {
+        continue;
+      }
+
+      process.env[key] = value;
+    }
+
+    return;
+  }
+}
+
 const plugin = {
   id: "zulip",
   name: "Zulip",
   description: "Zulip channel plugin",
   configSchema: emptyPluginConfigSchema(),
   register(api: OpenClawPluginApi) {
+    loadZulipEnv();
     setZulipRuntime(api.runtime);
     api.registerChannel({ plugin: zulipPlugin });
 
@@ -172,6 +301,19 @@ const plugin = {
           newName: { type: "string" },
         },
         required: ["action"],
+        anyOf: [
+          { properties: { action: { const: "list" } } },
+          { properties: { action: { const: "get" } }, required: ["action", "userId"] },
+          { properties: { action: { const: "get_own" } }, required: ["action"] },
+          { properties: { action: { const: "get_by_email" } }, required: ["action", "email"] },
+          { properties: { action: { const: "create" } }, required: ["action", "email", "fullName", "password"] },
+          { properties: { action: { const: "update" } }, required: ["action", "userId"] },
+          { properties: { action: { const: "deactivate" } }, required: ["action", "userId"] },
+          { properties: { action: { const: "reactivate" } }, required: ["action", "userId"] },
+          { properties: { action: { const: "presence" } }, required: ["action"] },
+          { properties: { action: { const: "get_realm_presence" } }, required: ["action"] },
+          { properties: { action: { const: "set_presence" } }, required: ["action"] },
+        ],
       },
       async execute(_toolCallId: string, params: Record<string, unknown>) {
         try {
@@ -379,15 +521,100 @@ const plugin = {
     });
 
     api.registerTool({
-      name: "zulip_users",
-      label: "Zulip Users",
-      description: "List users, fetch user details, and check user presence.",
+      name: "zulip_typing",
+      label: "Zulip Typing",
+      description: "Send start/stop typing indicators for stream topics or direct messages.",
       parameters: {
         type: "object",
         properties: {
-          action: { type: "string", enum: ["list", "get", "get_by_email", "presence"] },
+          op: { type: "string", enum: ["start", "stop"] },
+          type: { type: "string", enum: ["stream", "direct"] },
+          streamId: { type: "number" },
+          topic: { type: "string" },
+          userIds: { type: "array", items: { type: "number" } },
+        },
+        required: ["op", "type"],
+      },
+      async execute(_toolCallId: string, params: Record<string, unknown>) {
+        try {
+          const cfg = api.runtime.config.loadConfig();
+          const client = getClient(cfg);
+          const op = asString(params.op);
+          if (op !== "start" && op !== "stop") {
+            throw new Error("op must be start or stop");
+          }
+          const typingType = asString(params.type);
+          if (typingType !== "stream" && typingType !== "direct") {
+            throw new Error("type must be stream or direct");
+          }
+
+          if (typingType === "stream") {
+            const streamId = asNumber(params.streamId);
+            const topic = asString(params.topic)?.trim();
+            if (streamId == null) {
+              throw new Error("streamId is required for stream typing");
+            }
+            if (streamId <= 0) {
+              throw new Error("streamId must be a positive number for stream typing");
+            }
+            if (!topic) {
+              throw new Error("topic is required for stream typing");
+            }
+
+            await zulip.sendZulipTyping(client, {
+              op,
+              type: "stream",
+              streamId: Math.trunc(streamId),
+              topic,
+            });
+            return textResult(`Sent typing ${op} for stream ${Math.trunc(streamId)} > ${topic}.`);
+          }
+
+          const uniqueUserIds = requirePositiveIntArray(params.userIds, "userIds");
+
+          await zulip.sendZulipTyping(client, {
+            op,
+            type: "direct",
+            to: uniqueUserIds,
+          });
+          return textResult(`Sent typing ${op} for users [${uniqueUserIds.join(", ")}].`);
+        } catch (err) {
+          return textResult(`Error: ${(err as Error).message}`);
+        }
+      },
+    });
+
+    api.registerTool({
+      name: "zulip_users",
+      label: "Zulip Users",
+      description: "List, manage, and inspect Zulip users and presence.",
+      parameters: {
+        type: "object",
+        properties: {
+          action: {
+            type: "string",
+            enum: [
+              "list",
+              "get",
+              "get_own",
+              "get_by_email",
+              "create",
+              "update",
+              "deactivate",
+              "reactivate",
+              "presence",
+              "get_realm_presence",
+              "set_presence",
+            ],
+          },
           userId: { type: "number" },
           email: { type: "string" },
+          fullName: { type: "string" },
+          password: { type: "string" },
+          role: { type: "number" },
+          status: { type: "string", enum: ["active", "idle"] },
+          pingOnly: { type: "boolean" },
+          newUserInput: { type: "boolean" },
           includeDeactivated: { type: "boolean" },
           includeBots: { type: "boolean" },
         },
@@ -420,11 +647,13 @@ const plugin = {
           }
 
           if (action === "get") {
-            const userId = asNumber(params.userId);
-            if (!userId) {
-              throw new Error("userId is required for get");
-            }
-            const user = await zulip.fetchZulipUser(client, String(Math.trunc(userId)));
+            const userId = requirePositiveIntegerNumber(params.userId, "userId");
+            const user = await zulip.fetchZulipUser(client, String(userId));
+            return textResult(formatUserDetails(user));
+          }
+
+          if (action === "get_own") {
+            const user = await zulip.fetchZulipMe(client);
             return textResult(formatUserDetails(user));
           }
 
@@ -438,9 +667,9 @@ const plugin = {
           }
 
           if (action === "presence") {
-            const userId = asNumber(params.userId);
+            const userId = params.userId == null ? undefined : requirePositiveIntegerNumber(params.userId, "userId");
             const email = asString(params.email);
-            const key = userId ? String(Math.trunc(userId)) : email;
+            const key = userId ? String(userId) : email;
             if (!key) {
               throw new Error("userId or email is required for presence");
             }
@@ -454,6 +683,80 @@ const plugin = {
               return `- ${clientName}: ${info.status ?? "unknown"} (last seen: ${ts})`;
             });
             return textResult(lines.join("\n"));
+          }
+
+          if (action === "create") {
+            const email = asString(params.email)?.trim();
+            const fullName = asString(params.fullName)?.trim();
+            const password = asString(params.password);
+            if (!email || !fullName || !password) {
+              throw new Error("email, fullName, and password are required for create");
+            }
+            const role = params.role == null ? undefined : requirePositiveIntegerNumber(params.role, "role");
+            await zulip.createZulipUser(client, {
+              email,
+              fullName,
+              password,
+              role,
+            });
+            return textResult(`User ${email} created.`);
+          }
+
+          if (action === "update") {
+            const userId = requirePositiveIntegerNumber(params.userId, "userId");
+            const email = asString(params.email)?.trim();
+            const fullName = asString(params.fullName)?.trim();
+            const role = params.role == null ? undefined : requirePositiveIntegerNumber(params.role, "role");
+            if (!email && !fullName && role == null) {
+              throw new Error("provide email, fullName, and/or role for update");
+            }
+            await zulip.updateZulipUser(client, userId, {
+              email,
+              fullName,
+              role,
+            });
+            return textResult(`User ${userId} updated.`);
+          }
+
+          if (action === "deactivate") {
+            const userId = requirePositiveIntegerNumber(params.userId, "userId");
+            await zulip.deactivateZulipUser(client, String(userId));
+            return textResult(`User ${userId} deactivated.`);
+          }
+
+          if (action === "reactivate") {
+            const userId = requirePositiveIntegerNumber(params.userId, "userId");
+            await zulip.reactivateZulipUser(client, String(userId));
+            return textResult(`User ${userId} reactivated.`);
+          }
+
+          if (action === "get_realm_presence") {
+            const presence = await zulip.getZulipRealmPresence(client);
+            const entries = Object.entries(presence);
+            if (entries.length === 0) {
+              return textResult("No realm presence data.");
+            }
+            const lines = entries.map(([id, perClient]) => {
+              const clientStates = Object.entries(perClient)
+                .map(([clientName, info]) => `${clientName}:${info.status ?? "unknown"}`)
+                .join(", ");
+              return `- ${id}: ${clientStates}`;
+            });
+            return textResult(lines.join("\n"));
+          }
+
+          if (action === "set_presence") {
+            const status = asString(params.status) as "active" | "idle" | undefined;
+            const pingOnly = asBoolean(params.pingOnly);
+            if (!status && pingOnly !== true) {
+              throw new Error("status is required for set_presence unless pingOnly=true");
+            }
+            await zulip.setZulipOwnPresence(client, {
+              status,
+              pingOnly,
+              newUserInput: asBoolean(params.newUserInput),
+            });
+            return textResult("Presence updated.");
           }
 
           throw new Error(`Unknown action: ${action}`);
@@ -472,10 +775,12 @@ const plugin = {
         properties: {
           action: {
             type: "string",
-            enum: ["get", "search", "edit", "delete", "add_reaction", "remove_reaction"],
+            enum: ["get", "search", "edit", "delete", "add_reaction", "remove_reaction", "mark_all_read"],
           },
           messageId: { type: "number" },
           query: { type: "string" },
+          dmWith: { type: "array", items: { type: "string" } },
+          isDirect: { type: "boolean" },
           streamName: { type: "string" },
           topic: { type: "string" },
           senderId: { type: "number" },
@@ -514,6 +819,8 @@ const plugin = {
             const topic = asString(params.topic);
             const senderId = asNumber(params.senderId);
             const query = asString(params.query);
+            const dmWith = (asStringArray(params.dmWith) ?? []).map((entry) => entry.trim()).filter(Boolean);
+            const isDirect = asBoolean(params.isDirect) === true;
             if (streamName) {
               narrow.push({ operator: "stream", operand: streamName });
             }
@@ -525,6 +832,12 @@ const plugin = {
             }
             if (query) {
               narrow.push({ operator: "search", operand: query });
+            }
+            if (isDirect) {
+              narrow.push({ operator: "is", operand: "dm" });
+            }
+            if (dmWith.length > 0) {
+              narrow.push({ operator: "dm", operand: dmWith.join(",") });
             }
             const limit = Math.min(Math.max(Math.trunc(asNumber(params.limit) ?? 20), 1), 100);
             const anchorRaw = params.anchor;
@@ -566,6 +879,11 @@ const plugin = {
             }
             const lines = result.messages.map((m) => formatMessageDetails(m));
             return textResult(`${result.messages.length} message(s):\n\n${lines.join("\n\n---\n\n")}`);
+          }
+
+          if (action === "mark_all_read") {
+            await zulip.markAllZulipMessagesAsRead(client);
+            return textResult("Marked all messages as read.");
           }
 
           if (action === "edit") {
@@ -860,6 +1178,183 @@ const plugin = {
     });
 
     api.registerTool({
+      name: "zulip_reminders",
+      label: "Zulip Reminders",
+      description: "List, create, and delete Zulip reminders.",
+      parameters: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["list", "create", "delete"] },
+          reminderId: { type: "number" },
+          messageId: { type: "number" },
+          scheduledAt: { type: "string" },
+          note: { type: "string" },
+        },
+        required: ["action"],
+      },
+      async execute(_toolCallId: string, params: Record<string, unknown>) {
+        try {
+          const cfg = api.runtime.config.loadConfig();
+          const client = getClient(cfg);
+          const action = getAction(params);
+
+          if (action === "list") {
+            const reminders = await zulip.listZulipReminders(client);
+            if (reminders.length === 0) {
+              return textResult("No reminders.");
+            }
+            const lines = reminders.map((reminder) => {
+              const dueIso = new Date(reminder.scheduled_delivery_timestamp * 1000).toISOString();
+              const messageRef = reminder.reminder_target_message_id ? ` (message ${reminder.reminder_target_message_id})` : "";
+              return `- [${reminder.reminder_id}] due ${dueIso}${messageRef}: ${reminder.content}`;
+            });
+            return textResult(lines.join("\n"));
+          }
+
+          if (action === "create") {
+            const messageId = requirePositiveInt(params.messageId, "messageId");
+            const scheduledAt = asString(params.scheduledAt)?.trim();
+            const note = asString(params.note)?.trim();
+            if (!scheduledAt) {
+              throw new Error("scheduledAt is required for create");
+            }
+            const scheduledDeliveryTimestamp = parseDateToEpochSeconds(scheduledAt);
+            if (scheduledDeliveryTimestamp <= Math.floor(Date.now() / 1000)) {
+              throw new Error("scheduledAt must be in the future");
+            }
+            const created = await zulip.createZulipReminder(client, {
+              messageId,
+              scheduledDeliveryTimestamp,
+              note: note || undefined,
+            });
+            return textResult(`Reminder ${created.reminder_id} created.`);
+          }
+
+          if (action === "delete") {
+            const reminderId = requirePositiveInt(params.reminderId, "reminderId");
+            await zulip.deleteZulipReminder(client, reminderId);
+            return textResult(`Reminder ${reminderId} deleted.`);
+          }
+
+          throw new Error(`Unknown action: ${action}`);
+        } catch (err) {
+          return textResult(`Error: ${(err as Error).message}`);
+        }
+      },
+    });
+
+    api.registerTool({
+      name: "zulip_invitations",
+      label: "Zulip Invitations",
+      description: "List invitations and invite links; send, create, revoke, and resend invites.",
+      parameters: {
+        type: "object",
+        properties: {
+          action: {
+            type: "string",
+            enum: ["list", "send", "create_link", "revoke_link", "revoke", "resend"],
+          },
+          emails: { type: "array", items: { type: "string" }, minItems: 1 },
+          streamIds: { type: "array", items: { type: "integer", minimum: 1 }, minItems: 1 },
+          inviteAs: { type: "number", enum: [100, 200, 300, 400, 600] },
+          includeRealmDefaultSubscriptions: { type: "boolean" },
+          inviteExpiresInMinutes: { type: "integer", minimum: 1 },
+          inviteId: { type: "integer", minimum: 1 },
+          inviteLinkId: { type: "integer", minimum: 1 },
+        },
+        required: ["action"],
+        anyOf: [
+          { properties: { action: { const: "list" } } },
+          { properties: { action: { const: "send" } }, required: ["action", "emails"] },
+          { properties: { action: { const: "create_link" } }, required: ["action"] },
+          { properties: { action: { const: "revoke_link" } }, required: ["action", "inviteLinkId"] },
+          { properties: { action: { const: "revoke" } }, required: ["action", "inviteId"] },
+          { properties: { action: { const: "resend" } }, required: ["action", "inviteId"] },
+        ],
+      },
+      async execute(_toolCallId: string, params: Record<string, unknown>) {
+        try {
+          const cfg = api.runtime.config.loadConfig();
+          const client = getClient(cfg);
+          const action = getAction(params);
+
+          if (action === "list") {
+            const { invites, inviteLinks } = await zulip.listZulipInvitations(client);
+            if (invites.length === 0 && inviteLinks.length === 0) {
+              return textResult("No invitations or invite links.");
+            }
+            const inviteLines = invites.map((invite) => {
+              const sentAt = new Date(invite.invited * 1000).toISOString();
+              return `- [${invite.id}] ${invite.email} (sent:${sentAt})`;
+            });
+            const linkLines = inviteLinks.map((link) => `- [${link.id}] ${link.linkUrl}`);
+            return textResult(
+              [
+                inviteLines.length > 0 ? "Invitations:" : null,
+                inviteLines.length > 0 ? inviteLines.join("\n") : null,
+                linkLines.length > 0 ? "Invite links:" : null,
+                linkLines.length > 0 ? linkLines.join("\n") : null,
+              ]
+                .filter((line): line is string => Boolean(line))
+                .join("\n"),
+            );
+          }
+
+          if (action === "send") {
+            const emails = (asStringArray(params.emails) ?? [])
+              .map((email) => email.trim())
+              .filter((email) => email.length > 0);
+            if (emails.length === 0) {
+              throw new Error("emails is required for send");
+            }
+            await zulip.sendZulipInvitation(client, {
+              emails,
+              streamIds: requirePositiveIntegerArray(params.streamIds, "streamIds"),
+              inviteAs: params.inviteAs == null ? undefined : requireInviteAs(params.inviteAs),
+              includeRealmDefaultSubscriptions: asBoolean(params.includeRealmDefaultSubscriptions),
+            });
+            return textResult(`Invitation sent to ${emails.join(", ")}.`);
+          }
+
+          if (action === "create_link") {
+            const created = await zulip.createZulipInviteLink(client, {
+              streamIds: requirePositiveIntegerArray(params.streamIds, "streamIds"),
+              inviteAs: params.inviteAs == null ? undefined : requireInviteAs(params.inviteAs),
+              inviteExpiresInMinutes:
+                params.inviteExpiresInMinutes == null
+                  ? undefined
+                  : requirePositiveIntegerNumber(params.inviteExpiresInMinutes, "inviteExpiresInMinutes"),
+              includeRealmDefaultSubscriptions: asBoolean(params.includeRealmDefaultSubscriptions),
+            });
+            return textResult(`Invite link created: ${created.invite_link_url} (id:${created.id})`);
+          }
+
+          if (action === "revoke_link") {
+            const inviteLinkId = requirePositiveIntegerNumber(params.inviteLinkId, "inviteLinkId");
+            await zulip.revokeZulipInviteLink(client, inviteLinkId);
+            return textResult(`Invite link ${inviteLinkId} revoked.`);
+          }
+
+          if (action === "revoke") {
+            const inviteId = requirePositiveIntegerNumber(params.inviteId, "inviteId");
+            await zulip.revokeZulipInvitation(client, inviteId);
+            return textResult(`Invitation ${inviteId} revoked.`);
+          }
+
+          if (action === "resend") {
+            const inviteId = requirePositiveIntegerNumber(params.inviteId, "inviteId");
+            await zulip.resendZulipInvitation(client, inviteId);
+            return textResult(`Invitation ${inviteId} resent.`);
+          }
+
+          throw new Error(`Unknown action: ${action}`);
+        } catch (err) {
+          return textResult(`Error: ${(err as Error).message}`);
+        }
+      },
+    });
+
+    api.registerTool({
       name: "zulip_custom_emoji",
       label: "Zulip Custom Emoji",
       description: "List, upload, and deactivate custom Zulip emoji.",
@@ -1048,6 +1543,192 @@ const plugin = {
             }
             await zulip.deleteZulipDraft(client, Math.trunc(draftId));
             return textResult(`Draft ${Math.trunc(draftId)} deleted.`);
+          }
+
+          throw new Error(`Unknown action: ${action}`);
+        } catch (err) {
+          return textResult(`Error: ${(err as Error).message}`);
+        }
+      },
+    });
+
+    api.registerTool({
+      name: "zulip_saved_snippets",
+      label: "Zulip Saved Snippets",
+      description: "List and manage saved Zulip snippets.",
+      parameters: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["list", "create", "edit", "delete"] },
+          snippetId: { type: "number" },
+          title: { type: "string" },
+          content: { type: "string" },
+        },
+        required: ["action"],
+        anyOf: [
+          { properties: { action: { const: "list" } } },
+          { properties: { action: { const: "create" } }, required: ["action", "title", "content"] },
+          { properties: { action: { const: "edit" } }, required: ["action", "snippetId"] },
+          { properties: { action: { const: "delete" } }, required: ["action", "snippetId"] },
+        ],
+      },
+      async execute(_toolCallId: string, params: Record<string, unknown>) {
+        try {
+          const cfg = api.runtime.config.loadConfig();
+          const client = getClient(cfg);
+          const action = getAction(params);
+
+          if (action === "list") {
+            const snippets = await zulip.listZulipSavedSnippets(client);
+            if (snippets.length === 0) {
+              return textResult("No saved snippets.");
+            }
+            const lines = snippets.map((snippet) => {
+              const createdAt =
+                typeof snippet.date_created === "number"
+                  ? ` at ${new Date(snippet.date_created * 1000).toISOString()}`
+                  : "";
+              return `- [${snippet.id}] ${snippet.title}${createdAt}`;
+            });
+            return textResult(lines.join("\n"));
+          }
+
+          if (action === "create") {
+            const title = asString(params.title)?.trim();
+            const content = asString(params.content)?.trim();
+            if (!title || !content) {
+              throw new Error("title and content are required for create");
+            }
+            const created = await zulip.createZulipSavedSnippet(client, { title, content });
+            return textResult(`Saved snippet ${created.id} created.`);
+          }
+
+          if (action === "edit") {
+            const snippetId = requirePositiveIntegerNumber(params.snippetId, "snippetId");
+            const title = asString(params.title)?.trim();
+            const content = asString(params.content)?.trim();
+            if (!title && !content) {
+              throw new Error("provide title and/or content for edit");
+            }
+            await zulip.updateZulipSavedSnippet(client, snippetId, {
+              title,
+              content,
+            });
+            return textResult(`Saved snippet ${snippetId} updated.`);
+          }
+
+          if (action === "delete") {
+            const snippetId = requirePositiveIntegerNumber(params.snippetId, "snippetId");
+            await zulip.deleteZulipSavedSnippet(client, snippetId);
+            return textResult(`Saved snippet ${snippetId} deleted.`);
+          }
+
+          throw new Error(`Unknown action: ${action}`);
+        } catch (err) {
+          return textResult(`Error: ${(err as Error).message}`);
+        }
+      },
+    });
+
+    api.registerTool({
+      name: "zulip_code_playgrounds",
+      label: "Zulip Code Playgrounds",
+      description: "List, add, and remove Zulip code playgrounds.",
+      parameters: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["list", "add", "remove"] },
+          playgroundId: { type: "number" },
+          name: { type: "string" },
+          pygmentsLanguage: { type: "string" },
+          urlPrefix: { type: "string" },
+        },
+        required: ["action"],
+      },
+      async execute(_toolCallId: string, params: Record<string, unknown>) {
+        try {
+          const cfg = api.runtime.config.loadConfig();
+          const client = getClient(cfg);
+          const action = getAction(params);
+
+          if (action === "list") {
+            const playgrounds = await zulip.listZulipCodePlaygrounds(client);
+            const lines = playgrounds.map(
+              (playground) =>
+                `- [${playground.id}] ${playground.name} (${playground.pygments_language}) -> ${playground.url_prefix}`,
+            );
+            return textResult(lines.length > 0 ? lines.join("\n") : "No code playgrounds configured.");
+          }
+
+          if (action === "add") {
+            const name = asString(params.name)?.trim();
+            const pygmentsLanguage = asString(params.pygmentsLanguage)?.trim();
+            const urlPrefix = asString(params.urlPrefix)?.trim();
+            if (!name || !pygmentsLanguage || !urlPrefix) {
+              throw new Error("name, pygmentsLanguage, and urlPrefix are required for add");
+            }
+            const created = await zulip.addZulipCodePlayground(client, {
+              name,
+              pygmentsLanguage,
+              urlPrefix,
+            });
+            return textResult(`Code playground ${created.id} added.`);
+          }
+
+          if (action === "remove") {
+            const playgroundId = requirePositiveIntegerNumber(params.playgroundId, "playgroundId");
+            await zulip.removeZulipCodePlayground(client, playgroundId);
+            return textResult(`Code playground ${playgroundId} removed.`);
+          }
+
+          throw new Error(`Unknown action: ${action}`);
+        } catch (err) {
+          return textResult(`Error: ${(err as Error).message}`);
+        }
+      },
+    });
+
+    api.registerTool({
+      name: "zulip_default_streams",
+      label: "Zulip Default Streams",
+      description: "List, add, and remove realm default Zulip streams.",
+      parameters: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["list", "add", "remove"] },
+          streamId: { type: "number" },
+          streamName: { type: "string" },
+        },
+        required: ["action"],
+      },
+      async execute(_toolCallId: string, params: Record<string, unknown>) {
+        try {
+          const cfg = api.runtime.config.loadConfig();
+          const client = getClient(cfg);
+          const action = getAction(params);
+
+          if (action === "list") {
+            const streams = await zulip.listZulipDefaultStreams(client);
+            const lines = streams.map(
+              (stream) => `- ${stream.name ?? "(unnamed)"} (id:${stream.stream_id})`,
+            );
+            return textResult(lines.length > 0 ? lines.join("\n") : "No default streams configured.");
+          }
+
+          if (action === "add" || action === "remove") {
+            const streamId = params.streamId == null ? undefined : requirePositiveIntegerNumber(params.streamId, "streamId");
+            const streamName = asString(params.streamName);
+            const resolvedStreamId =
+              streamId ?? (streamName ? (await findStreamByName(client, streamName)).stream_id : undefined);
+            if (!resolvedStreamId) {
+              throw new Error(`streamId or streamName is required for ${action}`);
+            }
+            if (action === "add") {
+              await zulip.addZulipDefaultStream(client, resolvedStreamId);
+              return textResult(`Default stream ${resolvedStreamId} added.`);
+            }
+            await zulip.removeZulipDefaultStream(client, resolvedStreamId);
+            return textResult(`Default stream ${resolvedStreamId} removed.`);
           }
 
           throw new Error(`Unknown action: ${action}`);
@@ -1324,8 +2005,38 @@ const plugin = {
       parameters: {
         type: "object",
         properties: {
-          action: { type: "string", enum: ["server_info", "profile_fields", "user_profile"] },
+          action: {
+            type: "string",
+            enum: [
+              "server_info",
+              "profile_fields",
+              "user_profile",
+              "profile_fields_create",
+              "profile_fields_update",
+              "profile_fields_delete",
+              "profile_fields_reorder",
+              "user_profile_update",
+            ],
+          },
           userId: { type: "number" },
+          fieldId: { type: "number" },
+          name: { type: "string" },
+          fieldType: { type: "number" },
+          hint: { type: "string" },
+          fieldData: { type: "string" },
+          displayInProfileSummary: { type: "boolean" },
+          order: { type: "array", items: { type: "number" } },
+          data: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                id: { type: "number" },
+                value: { type: "string" },
+              },
+              required: ["id", "value"],
+            },
+          },
         },
         required: ["action"],
       },
@@ -1378,6 +2089,59 @@ const plugin = {
               return `- ${label}: ${data.rendered_value ?? data.value}`;
             });
             return textResult(lines.join("\n"));
+          }
+
+          if (action === "profile_fields_create") {
+            const name = asString(params.name)?.trim();
+            if (!name) {
+              throw new Error("name is required for profile_fields_create");
+            }
+            const fieldType = params.fieldType == null ? undefined : requirePositiveIntegerNumber(params.fieldType, "fieldType");
+            if (fieldType == null) {
+              throw new Error("fieldType is required for profile_fields_create");
+            }
+            const created = await zulip.createZulipCustomProfileField(client, {
+              name,
+              fieldType,
+              hint: asString(params.hint),
+              fieldData: asString(params.fieldData),
+              displayInProfileSummary: asBoolean(params.displayInProfileSummary),
+            });
+            return textResult(`Custom profile field ${created.id} created.`);
+          }
+
+          if (action === "profile_fields_update") {
+            const fieldId = requirePositiveIntegerNumber(params.fieldId, "fieldId");
+            await zulip.updateZulipCustomProfileField(client, fieldId, {
+              name: asString(params.name),
+              fieldType: params.fieldType == null ? undefined : requirePositiveIntegerNumber(params.fieldType, "fieldType"),
+              hint: asString(params.hint),
+              fieldData: asString(params.fieldData),
+              displayInProfileSummary: asBoolean(params.displayInProfileSummary),
+            });
+            return textResult(`Custom profile field ${fieldId} updated.`);
+          }
+
+          if (action === "profile_fields_delete") {
+            const fieldId = requirePositiveIntegerNumber(params.fieldId, "fieldId");
+            await zulip.deleteZulipCustomProfileField(client, fieldId);
+            return textResult(`Custom profile field ${fieldId} deleted.`);
+          }
+
+          if (action === "profile_fields_reorder") {
+            const order = requirePositiveIntegerArray(params.order, "order") ?? [];
+            if (order.length === 0) {
+              throw new Error("order must contain at least one profile field id");
+            }
+            await zulip.reorderZulipCustomProfileFields(client, order);
+            return textResult("Custom profile fields reordered.");
+          }
+
+          if (action === "user_profile_update") {
+            const userId = requirePositiveIntegerNumber(params.userId, "userId");
+            const data = requireProfileDataUpdates(params.data);
+            await zulip.updateZulipUserProfileData(client, userId, data);
+            return textResult(`User ${userId} profile data updated.`);
           }
 
           throw new Error(`Unknown action: ${action}`);
@@ -1871,12 +2635,9 @@ const plugin = {
           }
 
           if (action === "delete") {
-            const attachmentId = asNumber(params.attachmentId);
-            if (!attachmentId) {
-              throw new Error("attachmentId is required for delete");
-            }
-            await zulip.deleteZulipAttachment(client, Math.trunc(attachmentId));
-            return textResult(`Attachment ${Math.trunc(attachmentId)} deleted.`);
+            const attachmentId = requirePositiveIntegerNumber(params.attachmentId, "attachmentId");
+            await zulip.deleteZulipAttachment(client, attachmentId);
+            return textResult(`Attachment ${attachmentId} deleted.`);
           }
 
           if (action === "usage") {

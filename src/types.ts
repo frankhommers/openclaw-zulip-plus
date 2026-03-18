@@ -57,6 +57,21 @@ export type ZulipReactionConfig = {
   genericCallback?: ZulipGenericReactionCallbackConfig;
 };
 
+export type ZulipActionConfig = {
+  "channel-create"?: boolean;
+  "channel-edit"?: boolean;
+  "channel-delete"?: boolean;
+};
+
+export type ZulipPersonaRouteConfig = {
+  /** Optional stream matcher (normalized name; without leading "#"). */
+  stream?: string;
+  /** Optional topic matcher. */
+  topic?: string;
+  /** Persona prompt file path to inject for matching messages. */
+  personaFile?: string;
+};
+
 export type ZulipAccountConfig = {
   name?: string;
   capabilities?: string[];
@@ -81,6 +96,17 @@ export type ZulipAccountConfig = {
   groupAllowFrom?: Array<string | number>;
   groupPolicy?: string;
 
+  /** Allowlisted bot sender IDs that OpenClaw may process. */
+  allowBotIds?: number[];
+
+  /** Guardrails for recursive bot-to-bot chains. */
+  botLoopPrevention?: {
+    /** Maximum consecutive allowlisted bot messages in one thread before blocking. */
+    maxChainLength?: number;
+    /** Cooldown window for chain counting in milliseconds. */
+    cooldownMs?: number;
+  };
+
   /**
    * Reply to every message in monitored streams/topics (default: true).
    *
@@ -96,6 +122,12 @@ export type ZulipAccountConfig = {
 
   /** Reaction indicators while responding. */
   reactions?: ZulipReactionConfig;
+
+  /** Optional per-action toggles for channel mutation operations. */
+  actions?: ZulipActionConfig;
+
+  /** Optional stream/topic persona routing rules. */
+  personaRouting?: ZulipPersonaRouteConfig[];
 
   /** Animated emoji spinner during processing. */
   processingSpinner?: {

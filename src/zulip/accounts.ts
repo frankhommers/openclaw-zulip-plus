@@ -85,6 +85,11 @@ export type ResolvedZulipAccount = {
   workingMessages: {
     enabled: boolean;
   };
+  allowBotIds: number[];
+  botLoopPrevention: {
+    maxChainLength: number;
+    cooldownMs: number;
+  };
   textChunkLimit: number;
   config: ZulipAccountConfig;
 };
@@ -184,7 +189,14 @@ function mergeZulipAccountConfig(cfg: OpenClawConfig, accountId: string): ZulipA
     accounts?: unknown;
   };
   const account = resolveAccountConfig(cfg, accountId) ?? {};
-  return { ...base, ...account };
+  return {
+    ...base,
+    ...account,
+    actions: {
+      ...base.actions,
+      ...account.actions,
+    },
+  };
 }
 
 function resolveConfiguredBaseUrl(cfg: OpenClawConfig, accountId: string): string | undefined {
@@ -323,6 +335,21 @@ export function resolveZulipAccount(params: {
   const workingMessages = {
     enabled: merged.workingMessages?.enabled !== false,
   };
+  const allowBotIds = (merged.allowBotIds ?? [])
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0)
+    .map((value) => Math.floor(value));
+  const botLoopPrevention = {
+    maxChainLength:
+      typeof merged.botLoopPrevention?.maxChainLength === "number" &&
+      Number.isFinite(merged.botLoopPrevention.maxChainLength)
+        ? Math.max(1, Math.floor(merged.botLoopPrevention.maxChainLength))
+        : 5,
+    cooldownMs:
+      typeof merged.botLoopPrevention?.cooldownMs === "number" &&
+      Number.isFinite(merged.botLoopPrevention.cooldownMs)
+        ? Math.max(0, Math.floor(merged.botLoopPrevention.cooldownMs))
+        : 5 * 60 * 1000,
+  };
   const textChunkLimit =
     typeof merged.textChunkLimit === "number" ? merged.textChunkLimit : DEFAULT_TEXT_CHUNK_LIMIT;
 
@@ -353,6 +380,8 @@ export function resolveZulipAccount(params: {
     reactions,
     processingSpinner,
     workingMessages,
+    allowBotIds,
+    botLoopPrevention,
     textChunkLimit,
     config: merged,
   };

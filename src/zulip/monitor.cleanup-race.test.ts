@@ -20,6 +20,10 @@ const mocks = vi.hoisted(() => ({
   prepareZulipCheckpointForRecovery: vi.fn(),
   markZulipCheckpointFailure: vi.fn(),
   buildZulipCheckpointId: vi.fn(),
+  loadZulipProcessedMessageState: vi.fn(),
+  writeZulipProcessedMessageState: vi.fn(),
+  isZulipMessageProcessed: vi.fn(),
+  markZulipMessageProcessed: vi.fn(),
 }));
 
 vi.mock("openclaw/plugin-sdk", async (importOriginal) => {
@@ -75,6 +79,13 @@ vi.mock("./inflight-checkpoints.js", () => ({
   buildZulipCheckpointId: mocks.buildZulipCheckpointId,
 }));
 
+vi.mock("./processed-message-state.js", () => ({
+  loadZulipProcessedMessageState: mocks.loadZulipProcessedMessageState,
+  writeZulipProcessedMessageState: mocks.writeZulipProcessedMessageState,
+  isZulipMessageProcessed: mocks.isZulipMessageProcessed,
+  markZulipMessageProcessed: mocks.markZulipMessageProcessed,
+}));
+
 import { monitorZulipProvider } from "./monitor.js";
 
 describe("monitorZulipProvider cleanup race", () => {
@@ -94,6 +105,10 @@ describe("monitorZulipProvider cleanup race", () => {
     );
     mocks.writeZulipInFlightCheckpoint.mockResolvedValue(undefined);
     mocks.clearZulipInFlightCheckpoint.mockResolvedValue(undefined);
+    mocks.loadZulipProcessedMessageState.mockResolvedValue({ version: 1, watermarks: {} });
+    mocks.writeZulipProcessedMessageState.mockResolvedValue(undefined);
+    mocks.isZulipMessageProcessed.mockReturnValue(false);
+    mocks.markZulipMessageProcessed.mockReturnValue(true);
   });
 
   it("waits for dispatcher idle before cleanup so final reply is not aborted", async () => {
@@ -183,12 +198,28 @@ describe("monitorZulipProvider cleanup race", () => {
 
     mocks.resolveZulipAccount.mockReturnValue({
       accountId: "default",
+      enabled: true,
       baseUrl: "https://zulip.example.com",
       email: "bot@zulip.example.com",
       apiKey: "api-key",
       streams: ["marcel"],
       defaultTopic: "general",
       alwaysReply: true,
+      requireMention: false,
+      chatmode: "onmessage",
+      oncharPrefixes: [">", "!"],
+      blockStreaming: false,
+      blockStreamingCoalesce: {},
+      dmPolicy: "disabled",
+      allowFrom: [],
+      groupAllowFrom: [],
+      groupPolicy: "open",
+      responsePrefix: "",
+      allowBotIds: [],
+      botLoopPrevention: {
+        maxChainLength: 3,
+        cooldownMs: 30_000,
+      },
       textChunkLimit: 10_000,
       reactions: {
         enabled: false,
@@ -196,7 +227,34 @@ describe("monitorZulipProvider cleanup race", () => {
         onSuccess: "check",
         onFailure: "warning",
         clearOnFinish: true,
+        genericCallback: {
+          enabled: false,
+          includeRemoveOps: false,
+        },
+        workflow: {
+          enabled: false,
+          replaceStageReaction: false,
+          minTransitionMs: 0,
+          stages: {
+            queued: "",
+            processing: "",
+            toolRunning: "",
+            retrying: "",
+            success: "check",
+            partialSuccess: "warning",
+            failure: "warning",
+          },
+        },
       },
+      workingMessages: {
+        enabled: false,
+      },
+      processingSpinner: {
+        enabled: false,
+        emoji: [],
+        intervalMs: 10_000,
+      },
+      config: {},
     });
 
     mocks.buildZulipQueuePlan.mockReturnValue([{ stream: "marcel" }]);
@@ -215,6 +273,12 @@ describe("monitorZulipProvider cleanup race", () => {
       }) => {
         if (path === "/api/v1/users/me") {
           return { result: "success", user_id: 9 };
+        }
+        if (path === "/api/v1/users/me/subscriptions") {
+          return {
+            result: "success",
+            subscriptions: [{ stream_id: 42, name: "marcel" }],
+          };
         }
         if (path === "/api/v1/register") {
           return { result: "success", queue_id: "queue-1", last_event_id: 100 };

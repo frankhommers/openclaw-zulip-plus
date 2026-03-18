@@ -200,7 +200,7 @@ describe("ToolProgressAccumulator", () => {
     expect(log).toHaveBeenCalledWith(expect.stringContaining("network error"));
   });
 
-  it("multiple lines each get a timestamp prefix inside spoiler", async () => {
+  it("multiple lines render inside spoiler with grouped timestamps", async () => {
     vi.mocked(zulipRequestWithRetry).mockResolvedValue({ result: "success", id: 300 });
 
     const acc = makeAccumulator({ name: "TestBot" });
@@ -210,15 +210,13 @@ describe("ToolProgressAccumulator", () => {
 
     const content = String(vi.mocked(zulipRequestWithRetry).mock.calls[0]![0].form?.content ?? "");
     // Extract lines inside the spoiler block
-    const spoilerMatch = content.match(/```spoiler Tool calls\n([\s\S]*?)\n```/);
+    const spoilerMatch = content.match(/```spoiler[^\n]*\n([\s\S]*?)\n```/);
     expect(spoilerMatch).not.toBeNull();
     const spoilerContent = spoilerMatch![1]!;
     const lines = spoilerContent.split("\n");
-    expect(lines).toHaveLength(2);
-    // Each line starts with a timestamp
-    for (const line of lines) {
-      expect(line).toMatch(/^\[\d{1,2}:\d{2}\s*(AM|PM)\]/);
-    }
+    expect(lines.some((line) => /^\[\d{1,2}:\d{2}\s*(AM|PM)\]$/.test(line))).toBe(true);
+    expect(spoilerContent).toContain("exec: cmd1");
+    expect(spoilerContent).toContain("read: file.ts");
   });
 
   it("uses 'Agent' as default name when none provided", async () => {
@@ -242,11 +240,45 @@ describe("ToolProgressAccumulator", () => {
     const content = String(vi.mocked(zulipRequestWithRetry).mock.calls[0]![0].form?.content ?? "");
     // The spoiler block should not be broken by the backticks in the tool line.
     // The sanitizer inserts zero-width spaces between consecutive backticks.
-    const spoilerMatch = content.match(/```spoiler Tool calls\n([\s\S]*?)\n```$/);
+    const spoilerMatch = content.match(/```spoiler[^\n]*\n([\s\S]*?)\n```$/);
     expect(spoilerMatch).not.toBeNull();
     // The inner content should NOT contain raw triple backticks
     const inner = spoilerMatch![1]!;
     expect(inner).not.toMatch(/`{3}/);
+  });
+
+  it("groups lines that occur in the same minute under one timestamp", async () => {
+    vi.mocked(zulipRequestWithRetry).mockResolvedValue({ result: "success", id: 501 });
+
+    const acc = makeAccumulator({ name: "Marcel" });
+    vi.setSystemTime(new Date("2026-02-22T19:58:05"));
+    acc.addLine("🔧 exec: cmd1");
+
+    vi.setSystemTime(new Date("2026-02-22T19:58:45"));
+    acc.addLine("📖 read: file.ts");
+    await acc.flush();
+
+    const content = String(vi.mocked(zulipRequestWithRetry).mock.calls[0]![0].form?.content ?? "");
+    const spoilerMatch = content.match(/```spoiler[^\n]*\n([\s\S]*?)\n```$/);
+    expect(spoilerMatch).not.toBeNull();
+    const inner = spoilerMatch![1]!;
+    const minuteMarkerCount = (inner.match(/\[7:58 PM\]/g) ?? []).length;
+    expect(minuteMarkerCount).toBe(1);
+    expect(inner).toContain("exec: cmd1");
+    expect(inner).toContain("read: file.ts");
+  });
+
+  it("includes a spoiler title summary grouped by tool type", async () => {
+    vi.mocked(zulipRequestWithRetry).mockResolvedValue({ result: "success", id: 502 });
+
+    const acc = makeAccumulator({ name: "Marcel" });
+    acc.addLine("📝 Todo: write tests");
+    acc.addLine("🔧 exec: ls -la");
+    acc.addLine("🔧 exec: pwd");
+    await acc.flush();
+
+    const content = String(vi.mocked(zulipRequestWithRetry).mock.calls[0]![0].form?.content ?? "");
+    expect(content).toContain("```spoiler Tool calls · exec 2 · Todo 1");
   });
 
   it("shows 🔄 emoji while running (default status)", async () => {

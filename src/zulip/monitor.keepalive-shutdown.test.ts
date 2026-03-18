@@ -1,13 +1,24 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildKeepaliveMessageContent,
+  createMainMessageRelayHooks,
   createBestEffortShutdownNoticeSender,
   startPeriodicKeepalive,
 } from "./monitor.js";
+import {
+  clearMainMessageRunRelay,
+  lookupMainMessageRunRelay,
+  updateMainMessageRunRelay,
+} from "../agents/subagent-relay.js";
 
 describe("monitor keepalive + shutdown helpers", () => {
   afterEach(() => {
     vi.useRealTimers();
+    clearMainMessageRunRelay({
+      provider: "zulip",
+      accountId: "acct-1",
+      messageId: "101",
+    });
   });
 
   it("sends periodic keepalives after the initial delay", async () => {
@@ -69,5 +80,73 @@ describe("monitor keepalive + shutdown helpers", () => {
 
     expect(sendNotice).toHaveBeenCalledTimes(1);
     expect(log).toHaveBeenCalledWith(expect.stringContaining("shutdown notice failed"));
+  });
+
+  it("registers and updates relay state for the main message run", () => {
+    const relay = createMainMessageRelayHooks({
+      provider: "zulip",
+      accountId: "acct-1",
+      messageId: "101",
+      now: () => 10,
+    });
+
+    expect(
+      lookupMainMessageRunRelay({
+        provider: "zulip",
+        accountId: "acct-1",
+        messageId: "101",
+      }),
+    ).toMatchObject({
+      runId: "zulip:acct-1:101",
+      status: "dispatching",
+      updatedAtMs: 10,
+    });
+
+    relay.onModelSelected({ model: "gpt-5" });
+    relay.markStatus("retrying");
+
+    expect(
+      lookupMainMessageRunRelay({
+        provider: "zulip",
+        accountId: "acct-1",
+        messageId: "101",
+      }),
+    ).toMatchObject({
+      runId: "zulip:acct-1:101",
+      model: "gpt-5",
+      status: "retrying",
+    });
+
+    relay.clear();
+    expect(
+      lookupMainMessageRunRelay({
+        provider: "zulip",
+        accountId: "acct-1",
+        messageId: "101",
+      }),
+    ).toBeUndefined();
+  });
+
+  it("ignores relay updates after cleanup", () => {
+    const relay = createMainMessageRelayHooks({
+      provider: "zulip",
+      accountId: "acct-1",
+      messageId: "101",
+    });
+    relay.clear();
+
+    expect(() => {
+      relay.markStatus("completed");
+      relay.onModelSelected({ model: "ignored" });
+      updateMainMessageRunRelay("zulip:acct-1:101", { status: "completed" });
+    }).not.toThrow();
+
+    expect(
+      lookupMainMessageRunRelay({
+        provider: "zulip",
+        accountId: "acct-1",
+        messageId: "101",
+      }),
+    ).toBeUndefined();
   });
 });

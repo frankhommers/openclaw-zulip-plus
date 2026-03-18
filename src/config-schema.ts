@@ -60,6 +60,29 @@ const WorkingMessagesSchema = z
   })
   .passthrough();
 
+const ZulipActionsSchema = z
+  .object({
+    "channel-create": z.boolean().optional(),
+    "channel-edit": z.boolean().optional(),
+    "channel-delete": z.boolean().optional(),
+  })
+  .passthrough();
+
+const ZulipPersonaRouteSchema = z
+  .object({
+    stream: z.string().optional(),
+    topic: z.string().optional(),
+    personaFile: z.string().optional(),
+  })
+  .passthrough();
+
+const ZulipBotLoopPreventionSchema = z
+  .object({
+    maxChainLength: z.number().int().positive().optional(),
+    cooldownMs: z.number().int().nonnegative().optional(),
+  })
+  .passthrough();
+
 const ZulipAccountSchemaBase = z
   .object({
     name: z.string().optional(),
@@ -80,9 +103,13 @@ const ZulipAccountSchemaBase = z
     allowFrom: z.array(z.union([z.string(), z.number()])).optional(),
     groupAllowFrom: z.array(z.union([z.string(), z.number()])).optional(),
     groupPolicy: GroupPolicySchema.optional(),
+    allowBotIds: z.array(z.number().int().nonnegative()).optional(),
+    botLoopPrevention: ZulipBotLoopPreventionSchema.optional(),
     alwaysReply: z.boolean().optional(),
     defaultTopic: z.string().optional(),
     reactions: ReactionSchema.optional(),
+    actions: ZulipActionsSchema.optional(),
+    personaRouting: z.array(ZulipPersonaRouteSchema).optional(),
     processingSpinner: ProcessingSpinnerSchema.optional(),
     workingMessages: WorkingMessagesSchema.optional(),
     textChunkLimit: z.number().int().positive().optional(),
