@@ -1,5 +1,5 @@
 {
-  "name": "openclaw-zulip-plus",
+  "name": "@frankhommers/openclaw-zulip-plus",
   "version": "1.0.0",
   "description": "Merged Zulip channel plugin for OpenClaw - combines features from multiple implementations",
   "main": "index.ts",
@@ -12,7 +12,8 @@
   "type": "module",
   "scripts": {
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run typecheck && npm test"
   },
   "license": "MIT",
   "keywords": [
@@ -45,7 +46,7 @@
       "order": 70
     },
     "install": {
-      "npmSpec": "openclaw-zulip-plus",
+      "npmSpec": "@frankhommers/openclaw-zulip-plus",
       "localPath": "extensions/zulip",
       "defaultChoice": "npm"
     }

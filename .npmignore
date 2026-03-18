@@ -1,0 +1,27 @@
+# Development
+*.test.ts
+vitest.config.*
+tsconfig.json
+.github/
+.gitignore
+.gitmodules
+
+# Upstream forks (reference only)
+upstream/
+
+# Worktrees
+.worktrees/
+
+# Documentation and plans
+docs/
+SKILL.md
+CLAUDE.md
+
+# IDE and OS
+.vscode/
+.idea/
+.DS_Store
+
+# Dependencies
+node_modules/
+package-lock.json
