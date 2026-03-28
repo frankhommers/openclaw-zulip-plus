@@ -1909,7 +1909,7 @@ export async function uploadZulipCustomEmoji(
   const form = new FormData();
   form.append(
     "filename",
-    new Blob([imageBuffer], { type: contentType ?? "application/octet-stream" }),
+    new Blob([imageBuffer as unknown as Uint8Array<ArrayBuffer>], { type: contentType ?? "application/octet-stream" }),
     fileName ?? `${emojiName}.bin`,
   );
   const payload = await zulipClientRequestWithRetry<ZulipApiResponse>(

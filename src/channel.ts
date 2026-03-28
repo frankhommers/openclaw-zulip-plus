@@ -1,18 +1,15 @@
+import { DEFAULT_ACCOUNT_ID, normalizeAccountId } from "openclaw/plugin-sdk/account-id";
+import { buildChannelConfigSchema } from "openclaw/plugin-sdk/channel-config-schema";
 import {
-  applyAccountNameToChannelSection,
-  buildChannelConfigSchema,
-  DEFAULT_ACCOUNT_ID,
   deleteAccountFromConfigSection,
   formatPairingApproveHint,
-  migrateBaseNameToDefaultAccount,
-  normalizeAccountId,
   setAccountEnabledInConfigSection,
   type ChannelPlugin,
-} from "openclaw/plugin-sdk";
+} from "openclaw/plugin-sdk/core";
+import { applyAccountNameToChannelSection, migrateBaseNameToDefaultAccount } from "openclaw/plugin-sdk/setup";
 import { ZulipConfigSchema } from "./config-schema.js";
 import { resolveZulipGroupRequireMention } from "./group-mentions.js";
 import { looksLikeZulipTargetId, normalizeZulipMessagingTarget } from "./normalize.js";
-import { zulipOnboardingAdapter } from "./onboarding.js";
 import { getZulipRuntime } from "./runtime.js";
 import type { ZulipAccountConfig, ZulipConfig } from "./types.js";
 import {
@@ -74,7 +71,6 @@ export const zulipPlugin: ChannelPlugin<ResolvedZulipAccount> = {
       debounceMs: 250,
     },
   },
-  onboarding: zulipOnboardingAdapter,
   pairing: {
     idLabel: "zulipUserId",
     normalizeAllowEntry: (entry) => normalizeAllowEntry(entry),

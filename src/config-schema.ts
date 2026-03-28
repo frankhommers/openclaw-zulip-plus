@@ -1,9 +1,15 @@
-import {
-  BlockStreamingCoalesceSchema,
-  DmPolicySchema,
-  GroupPolicySchema,
-} from "openclaw/plugin-sdk";
+import { DmPolicySchema, GroupPolicySchema } from "openclaw/plugin-sdk/channel-config-schema";
 import { z } from "zod";
+
+// BlockStreamingCoalesceSchema is not in the public plugin-sdk API;
+// define it inline so we don't depend on internal openclaw exports.
+const BlockStreamingCoalesceSchema = z
+  .object({
+    minChars: z.number().int().positive().optional(),
+    maxChars: z.number().int().positive().optional(),
+    idleMs: z.number().int().nonnegative().optional(),
+  })
+  .strict();
 
 const ReactionWorkflowStagesSchema = z
   .object({

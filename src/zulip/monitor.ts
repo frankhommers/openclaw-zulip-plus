@@ -1,7 +1,33 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
-import type { OpenClawConfig, ReplyPayload, RuntimeEnv } from "openclaw/plugin-sdk";
-import { createReplyPrefixOptions, createScopedPairingAccess } from "openclaw/plugin-sdk";
+import type { OpenClawConfig } from "openclaw/plugin-sdk";
+import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
+import { createReplyPrefixOptions } from "openclaw/plugin-sdk/channel-runtime";
+import { normalizeAccountId } from "openclaw/plugin-sdk/account-id";
+import type { ReplyPayload } from "openclaw/plugin-sdk/reply-runtime";
+
+// createScopedPairingAccess was removed from public SDK; inline the implementation
+function createScopedPairingAccess(params: {
+  core: ReturnType<typeof import("../runtime.js").getZulipRuntime>;
+  channel: string;
+  accountId: string | null | undefined;
+}) {
+  const resolvedAccountId = normalizeAccountId(params.accountId);
+  return {
+    accountId: resolvedAccountId,
+    readAllowFromStore: () =>
+      params.core.channel.pairing.readAllowFromStore({
+        channel: params.channel,
+        accountId: resolvedAccountId,
+      }),
+    upsertPairingRequest: (input: { id: string; meta?: Record<string, string | null | undefined> }) =>
+      params.core.channel.pairing.upsertPairingRequest({
+        channel: params.channel,
+        accountId: resolvedAccountId,
+        ...input,
+      }),
+  };
+}
 import {
   clearMainMessageRunRelay,
   registerMainMessageRunRelay,

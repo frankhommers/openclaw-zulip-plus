@@ -100,7 +100,7 @@ describe("zulipMessageActions", () => {
   });
 
   it("hides channel mutation actions by default", () => {
-    const actions = zulipMessageActions.listActions!({ cfg: buildConfig() });
+    const actions = zulipMessageActions.describeMessageTool!({ cfg: buildConfig() })?.actions ?? [];
 
     expect(actions).not.toContain("channel-create");
     expect(actions).not.toContain("channel-edit");
@@ -139,7 +139,7 @@ describe("zulipMessageActions", () => {
       },
     });
 
-    const actions = zulipMessageActions.listActions!({ cfg });
+    const actions = zulipMessageActions.describeMessageTool!({ cfg })?.actions ?? [];
 
     expect(actions).toContain("channel-create");
     expect(actions).toContain("channel-edit");
@@ -205,7 +205,7 @@ describe("zulipMessageActions", () => {
       } as never,
     }) as never);
 
-    const actions = zulipMessageActions.listActions!({ cfg: buildConfig() });
+    const actions = zulipMessageActions.describeMessageTool!({ cfg: buildConfig() })?.actions ?? [];
 
     expect(actions).toContain("channel-create");
     expect(actions).not.toContain("channel-edit");

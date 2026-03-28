@@ -3,7 +3,7 @@ import type {
   ChannelMessageActionName,
   OpenClawConfig,
 } from "openclaw/plugin-sdk";
-import { jsonResult, readNumberParam, readStringParam } from "openclaw/plugin-sdk";
+import { jsonResult, readNumberParam, readStringParam } from "openclaw/plugin-sdk/agent-runtime";
 import { resolveZulipAccount } from "./accounts.js";
 import {
   addZulipReactionViaClient,
@@ -436,10 +436,10 @@ function readRealmUpdateParams(
 }
 
 export const zulipMessageActions: ChannelMessageActionAdapter = {
-  listActions: ({ cfg }) => {
-    const account = resolveZulipAccount({ cfg });
+  describeMessageTool: ({ cfg, accountId }) => {
+    const account = resolveZulipAccount({ cfg, accountId: accountId ?? undefined });
     if (!account.apiKey || !account.email || !account.baseUrl) {
-      return [];
+      return null;
     }
     const actions = new Set<ChannelMessageActionName>([
       "send",
@@ -455,25 +455,14 @@ export const zulipMessageActions: ChannelMessageActionAdapter = {
       "member-info",
       "pin",
       "unpin",
+      "history" as ChannelMessageActionName,
     ]);
-    actions.add("history" as ChannelMessageActionName);
     for (const action of CHANNEL_MUTATION_ACTIONS) {
       if (isChannelMutationActionEnabled(account, action)) {
         actions.add(action as ChannelMessageActionName);
       }
     }
-    // TODO: These actions require core SDK changes to MESSAGE_ACTION_TARGET_MODE.
-    // Re-enable once the SDK supports plugin-registered action target modes.
-    // See: https://github.com/openclaw/openclaw/issues/TBD
-    // actions.add("channel-subscribe" as ChannelMessageActionName);
-    // actions.add("invite" as ChannelMessageActionName);
-    // actions.add("resolve-topic" as ChannelMessageActionName);
-    // actions.add("user-presence" as ChannelMessageActionName);
-    // actions.add("user-deactivate" as ChannelMessageActionName);
-    // actions.add("user-reactivate" as ChannelMessageActionName);
-    // actions.add("org-settings" as ChannelMessageActionName);
-    // actions.add("org-settings-edit" as ChannelMessageActionName);
-    return Array.from(actions);
+    return { actions: Array.from(actions) };
   },
   extractToolSend: ({ args }) => {
     const action = typeof args.action === "string" ? args.action.trim() : "";

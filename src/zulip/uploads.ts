@@ -1,10 +1,8 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  fetchWithSsrFGuard,
-  resolveChannelMediaMaxBytes,
-  type OpenClawConfig,
-} from "openclaw/plugin-sdk";
+import { fetchWithSsrFGuard } from "openclaw/plugin-sdk/infra-runtime";
+import { resolveChannelMediaMaxBytes } from "openclaw/plugin-sdk/media-runtime";
+import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import { getZulipRuntime } from "../runtime.js";
 import type { ZulipApiSuccess, ZulipAuth } from "./client.js";
 import { sweepExpiredMedia } from "./media-sweep.js";
@@ -418,7 +416,7 @@ export async function uploadZulipFile(params: {
   );
 
   const form = new FormData();
-  const blob = new Blob([params.buffer as Uint8Array], {
+  const blob = new Blob([params.buffer as unknown as Uint8Array<ArrayBuffer>], {
     type: params.contentType?.trim() || "application/octet-stream",
   });
   form.append("file", blob, params.filename);
