@@ -1,6 +1,6 @@
 {
   "name": "@frankhommers/openclaw-zulip-plus",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Merged Zulip channel plugin for OpenClaw - combines features from multiple implementations",
   "main": "index.ts",
   "files": [
