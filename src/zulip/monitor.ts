@@ -2826,7 +2826,7 @@ export async function monitorZulipProvider(
           });
 
       const stopSpinner =
-        isDM || !account.processingSpinner.enabled
+        isDM || !account.processingSpinner.enabled || thinkingProgress
           ? async () => {}
           : startProcessingSpinner({
               auth,
