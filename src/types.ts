@@ -141,6 +141,13 @@ export type ZulipAccountConfig = {
     enabled?: boolean;
   };
 
+  /** Show model thinking/reasoning in a collapsed spoiler block. Default: enabled. */
+  showThinking?: {
+    enabled?: boolean;
+    /** Minimum ms between edits to the thinking message. Default: 1500. */
+    debounceMs?: number;
+  };
+
   /** Maximum chars before chunking. */
   textChunkLimit?: number;
   chunkMode?: "length" | "newline";

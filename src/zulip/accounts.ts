@@ -85,6 +85,10 @@ export type ResolvedZulipAccount = {
   workingMessages: {
     enabled: boolean;
   };
+  showThinking: {
+    enabled: boolean;
+    debounceMs: number;
+  };
   allowBotIds: number[];
   botLoopPrevention: {
     maxChainLength: number;
@@ -335,6 +339,14 @@ export function resolveZulipAccount(params: {
   const workingMessages = {
     enabled: merged.workingMessages?.enabled !== false,
   };
+  const showThinking = {
+    enabled: merged.showThinking?.enabled !== false,
+    debounceMs:
+      typeof merged.showThinking?.debounceMs === "number" &&
+      Number.isFinite(merged.showThinking.debounceMs)
+        ? Math.max(200, Math.floor(merged.showThinking.debounceMs))
+        : 1500,
+  };
   const allowBotIds = (merged.allowBotIds ?? [])
     .filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0)
     .map((value) => Math.floor(value));
@@ -380,6 +392,7 @@ export function resolveZulipAccount(params: {
     reactions,
     processingSpinner,
     workingMessages,
+    showThinking,
     allowBotIds,
     botLoopPrevention,
     textChunkLimit,
