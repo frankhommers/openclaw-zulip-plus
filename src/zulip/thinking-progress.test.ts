@@ -61,13 +61,15 @@ describe("ThinkingAccumulator", () => {
     expect(call.stream).toBe("test-stream");
     expect(call.topic).toBe("test-topic");
     const content = call.content;
-    expect(content).toMatch(/```spoiler 🧠 Thinking\.\.\. · updated/);
+    expect(content).toContain("**Thinking...**");
+    expect(content).toContain("updated");
+    expect(content).toContain("```spoiler Thinking");
     expect(content).toContain("Analyzing the problem...");
     expect(content).toMatch(/```$/);
     expect(acc.hasSentMessage).toBe(true);
   });
 
-  it("edits existing message on subsequent flushes", async () => {
+  it("edits existing message on subsequent flushes (snapshot mode)", async () => {
     mockSend.mockResolvedValueOnce({ result: "success", id: 200 });
     mockEdit.mockResolvedValueOnce({ result: "success" });
 
@@ -78,7 +80,8 @@ describe("ThinkingAccumulator", () => {
     expect(mockSend).toHaveBeenCalledTimes(1);
     expect(acc.hasSentMessage).toBe(true);
 
-    acc.append(" Second thought.");
+    // SDK sends cumulative snapshot, not delta
+    acc.append("First thought. Second thought.");
     await acc.flush();
 
     expect(mockEdit).toHaveBeenCalledTimes(1);
@@ -101,7 +104,10 @@ describe("ThinkingAccumulator", () => {
 
     expect(mockEdit).toHaveBeenCalledTimes(1);
     const content = mockEdit.mock.calls[0]![0].content;
-    expect(content).toMatch(/```spoiler 🧠 Thinking complete · ~\d+ tokens · 5\.0s/);
+    expect(content).toContain("**Thinking complete**");
+    expect(content).toContain("tokens");
+    expect(content).toContain("5.0s");
+    expect(content).toContain("```spoiler Thinking");
     expect(content).not.toContain("Thinking...");
   });
 
@@ -131,7 +137,7 @@ describe("ThinkingAccumulator", () => {
     await acc.flush();
 
     const content = mockSend.mock.calls[0]![0].content;
-    const spoilerMatch = content.match(/```spoiler [^\n]+\n([\s\S]*?)\n```$/);
+    const spoilerMatch = content.match(/```spoiler Thinking\n([\s\S]*?)\n```$/);
     expect(spoilerMatch).not.toBeNull();
     const inner = spoilerMatch![1]!;
     // Inner content should not contain raw triple backticks
@@ -182,13 +188,15 @@ describe("ThinkingAccumulator", () => {
     mockSend.mockResolvedValueOnce({ result: "success", id: 700 });
 
     const acc = makeAccumulator();
+    // First snapshot
     acc.append("Reasoning:\n_Frank is testing the setup_");
-    acc.append("Reasoning:\n_Let me think about this more carefully_");
+    // Second snapshot (cumulative)
+    acc.append("Reasoning:\n_Frank is testing the setup_\n_Let me think about this more carefully_");
     await acc.flush();
 
     const content = mockSend.mock.calls[0]![0].content;
     expect(content).not.toContain("Reasoning:");
-    expect(content).not.toMatch(/^_.*_$/m);
+    // Should not have italic markers as standalone line wrapping
     expect(content).toContain("Frank is testing the setup");
     expect(content).toContain("Let me think about this more carefully");
   });
@@ -206,13 +214,14 @@ describe("ThinkingAccumulator", () => {
     expect(content).toContain("Line two");
   });
 
-  it("debounces rapid appends into single send", async () => {
+  it("debounces rapid snapshots into single send", async () => {
     mockSend.mockResolvedValueOnce({ result: "success", id: 600 });
 
     const acc = makeAccumulator();
-    acc.append("Part 1. ");
-    acc.append("Part 2. ");
-    acc.append("Part 3.");
+    // Each call is a cumulative snapshot
+    acc.append("Part 1.");
+    acc.append("Part 1. Part 2.");
+    acc.append("Part 1. Part 2. Part 3.");
 
     expect(mockSend).not.toHaveBeenCalled();
 
@@ -220,6 +229,7 @@ describe("ThinkingAccumulator", () => {
 
     expect(mockSend).toHaveBeenCalledTimes(1);
     const content = mockSend.mock.calls[0]![0].content;
+    // Only the last snapshot should be in the buffer
     expect(content).toContain("Part 1. Part 2. Part 3.");
   });
 });

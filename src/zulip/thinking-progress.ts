@@ -32,12 +32,17 @@ export class ThinkingAccumulator {
     return this.messageId !== undefined;
   }
 
+  /**
+   * Accept a reasoning payload. The SDK sends the full cumulative
+   * formatted text on each call (snapshot mode), so we replace
+   * the buffer rather than appending.
+   */
   append(text: string): void {
     if (this.finalized) return;
     if (!this.buffer) {
       this.startedAt = Date.now();
     }
-    this.buffer += ThinkingAccumulator.stripReasoningMarkup(text);
+    this.buffer = ThinkingAccumulator.stripReasoningMarkup(text);
     this.scheduleFlush();
   }
 
@@ -57,12 +62,12 @@ export class ThinkingAccumulator {
     if (complete) {
       const tokens = ThinkingAccumulator.estimateTokens(this.buffer);
       const elapsed = ((Date.now() - this.startedAt) / 1000).toFixed(1);
-      const title = `\u{1F9E0} Thinking complete \u00B7 ~${tokens} tokens \u00B7 ${elapsed}s`;
-      return `\`\`\`spoiler ${title}\n${sanitized}\n\`\`\``;
+      const header = `\u{1F9E0} **Thinking complete** \u00B7 ~${tokens} tokens \u00B7 ${elapsed}s`;
+      return `${header}\n\n\`\`\`spoiler Thinking\n${sanitized}\n\`\`\``;
     }
     const updated = formatClockTime(Date.now());
-    const title = `\u{1F9E0} Thinking... \u00B7 updated ${updated}`;
-    return `\`\`\`spoiler ${title}\n${sanitized}\n\`\`\``;
+    const header = `\u{1F9E0} **Thinking...** \u00B7 updated ${updated}`;
+    return `${header}\n\n\`\`\`spoiler Thinking\n${sanitized}\n\`\`\``;
   }
 
   static estimateTokens(text: string): string {
