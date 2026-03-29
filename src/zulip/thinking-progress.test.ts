@@ -61,9 +61,7 @@ describe("ThinkingAccumulator", () => {
     expect(call.stream).toBe("test-stream");
     expect(call.topic).toBe("test-topic");
     const content = call.content;
-    expect(content).toContain("**Thinking...**");
-    expect(content).toContain("updated");
-    expect(content).toContain("```spoiler Thinking");
+    expect(content).toMatch(/```spoiler Thinking - updated/);
     expect(content).toContain("Analyzing the problem...");
     expect(content).toMatch(/```$/);
     expect(acc.hasSentMessage).toBe(true);
@@ -104,10 +102,7 @@ describe("ThinkingAccumulator", () => {
 
     expect(mockEdit).toHaveBeenCalledTimes(1);
     const content = mockEdit.mock.calls[0]![0].content;
-    expect(content).toContain("**Thinking complete**");
-    expect(content).toContain("tokens");
-    expect(content).toContain("5.0s");
-    expect(content).toContain("```spoiler Thinking");
+    expect(content).toMatch(/```spoiler Thinking complete - \d+ tokens, 5\.0s/);
     expect(content).not.toContain("Thinking...");
   });
 
@@ -137,7 +132,7 @@ describe("ThinkingAccumulator", () => {
     await acc.flush();
 
     const content = mockSend.mock.calls[0]![0].content;
-    const spoilerMatch = content.match(/```spoiler Thinking\n([\s\S]*?)\n```$/);
+    const spoilerMatch = content.match(/```spoiler [^\n]+\n([\s\S]*?)\n```$/);
     expect(spoilerMatch).not.toBeNull();
     const inner = spoilerMatch![1]!;
     // Inner content should not contain raw triple backticks

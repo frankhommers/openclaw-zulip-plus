@@ -51,9 +51,20 @@ export class ThinkingAccumulator {
    * clean plaintext in the buffer.
    */
   private static stripReasoningMarkup(text: string): string {
-    let cleaned = text.replace(/^Reasoning:\n?/gm, "");
-    // Remove italic markers wrapping each line (_text_)
-    cleaned = cleaned.replace(/^_(.*)_$/gm, "$1");
+    // Remove leading "Reasoning:" header (only at start of text)
+    let cleaned = text.replace(/^Reasoning:\n/, "");
+    // Remove italic markers that wrap entire lines (_text_)
+    // Only match lines that start AND end with _ (SDK italic wrapping)
+    cleaned = cleaned
+      .split("\n")
+      .map((line) => {
+        const trimmed = line.trimEnd();
+        if (trimmed.startsWith("_") && trimmed.endsWith("_") && trimmed.length > 2) {
+          return trimmed.slice(1, -1);
+        }
+        return line;
+      })
+      .join("\n");
     return cleaned;
   }
 
@@ -62,12 +73,11 @@ export class ThinkingAccumulator {
     if (complete) {
       const tokens = ThinkingAccumulator.estimateTokens(this.buffer);
       const elapsed = ((Date.now() - this.startedAt) / 1000).toFixed(1);
-      const header = `\u{1F9E0} **Thinking complete** \u00B7 ~${tokens} tokens \u00B7 ${elapsed}s`;
-      return `${header}\n\n\`\`\`spoiler Thinking\n${sanitized}\n\`\`\``;
+      const title = `Thinking complete - ${tokens} tokens, ${elapsed}s`;
+      return `\`\`\`spoiler ${title}\n${sanitized}\n\`\`\``;
     }
     const updated = formatClockTime(Date.now());
-    const header = `\u{1F9E0} **Thinking...** \u00B7 updated ${updated}`;
-    return `${header}\n\n\`\`\`spoiler Thinking\n${sanitized}\n\`\`\``;
+    return `\`\`\`spoiler Thinking - updated ${updated}\n${sanitized}\n\`\`\``;
   }
 
   static estimateTokens(text: string): string {
