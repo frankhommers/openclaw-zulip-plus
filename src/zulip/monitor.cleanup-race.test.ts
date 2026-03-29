@@ -210,6 +210,7 @@ describe("monitorZulipProvider cleanup race", () => {
       oncharPrefixes: [">", "!"],
       blockStreaming: false,
       blockStreamingCoalesce: {},
+      showThinking: { enabled: false, debounceMs: 1500 },
       dmPolicy: "disabled",
       allowFrom: [],
       groupAllowFrom: [],

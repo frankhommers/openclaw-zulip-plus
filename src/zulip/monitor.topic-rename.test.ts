@@ -217,6 +217,7 @@ function createHarness(events: ZulipQueueEvent[]) {
       cooldownMs: 30_000,
     },
     textChunkLimit: 10_000,
+    showThinking: { enabled: false, debounceMs: 1500 },
     workingMessages: {
       enabled: false,
     },
