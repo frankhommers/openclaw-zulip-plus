@@ -6,3 +6,4 @@ dist/
 !index.ts
 .env
 .worktrees/
+.agent-session-logs
