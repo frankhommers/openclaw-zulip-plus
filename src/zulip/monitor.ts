@@ -79,6 +79,7 @@ import {
   sendZulipStreamMessage,
 } from "./send.js";
 import { ToolProgressAccumulator } from "./tool-progress.js";
+import { ThinkingAccumulator } from "./thinking-progress.js";
 import { downloadZulipUploads, resolveOutboundMedia, uploadZulipFile } from "./uploads.js";
 
 export type MonitorZulipOptions = {
@@ -2702,6 +2703,17 @@ export async function monitorZulipProvider(
             log: (m) => logger.debug?.(m),
           })
         : null;
+      const thinkingProgress =
+        !isDM && account.showThinking.enabled
+          ? new ThinkingAccumulator({
+              auth,
+              stream,
+              topic,
+              debounceMs: account.showThinking.debounceMs,
+              abortSignal: deliverySignal,
+              log: (m) => logger.debug?.(m),
+            })
+          : null;
       const { dispatcher, replyOptions, markDispatchIdle } =
         core.channel.reply.createReplyDispatcherWithTyping({
           ...prefixOptions,
@@ -2731,10 +2743,15 @@ export async function monitorZulipProvider(
               return;
             }
 
-            // Finalize the accumulated tool progress before sending non-tool replies,
-            // so the batched tool message appears above the block/final reply.
-            if (kind !== "tool" && toolProgress?.hasContent) {
-              await toolProgress.finalize();
+            // Finalize thinking and tool progress before sending non-tool replies,
+            // so the spoiler/batched tool message appears above the block/final reply.
+            if (kind !== "tool") {
+              if (thinkingProgress?.hasContent) {
+                await thinkingProgress.finalize();
+              }
+              if (toolProgress?.hasContent) {
+                await toolProgress.finalize();
+              }
             }
 
             // Use deliverySignal (not abortSignal) so in-flight replies survive
@@ -2840,6 +2857,18 @@ export async function monitorZulipProvider(
                 ...replyOptions,
                 disableBlockStreaming: !account.blockStreaming,
                 onModelSelected,
+                onReasoningStream: thinkingProgress
+                  ? (payload: ReplyPayload) => {
+                      if (payload.text) {
+                        thinkingProgress.append(payload.text);
+                      }
+                    }
+                  : undefined,
+                onReasoningEnd: thinkingProgress
+                  ? async () => {
+                      await thinkingProgress.finalize();
+                    }
+                  : undefined,
               },
             });
             ok = true;
@@ -2892,6 +2921,7 @@ export async function monitorZulipProvider(
               logger.debug?.(`[zulip] tool progress finalize failed: ${String(err)}`);
             });
           }
+          thinkingProgress?.dispose();
           // Clean up periodic keepalive timers.
           stopKeepalive();
           await stopSpinner();
@@ -3136,6 +3166,17 @@ export async function monitorZulipProvider(
         CommandAuthorized: true,
       });
 
+      const recoveryThinking = account.showThinking.enabled
+        ? new ThinkingAccumulator({
+            auth,
+            stream: params.stream,
+            topic: params.topic,
+            debounceMs: account.showThinking.debounceMs,
+            abortSignal,
+            log: (m) => logger.debug?.(m),
+          })
+        : null;
+
       void core.channel.reply
         .dispatchReplyFromConfig({
           ctx: ctxPayload,
@@ -3174,10 +3215,25 @@ export async function monitorZulipProvider(
           },
           replyOptions: {
             disableBlockStreaming: !account.blockStreaming,
+            onReasoningStream: recoveryThinking
+              ? (payload: ReplyPayload) => {
+                  if (payload.text) {
+                    recoveryThinking.append(payload.text);
+                  }
+                }
+              : undefined,
+            onReasoningEnd: recoveryThinking
+              ? async () => {
+                  await recoveryThinking.finalize();
+                }
+              : undefined,
           },
         })
         .catch((err: unknown) => {
           logger.error?.(`[zulip] ${params.errorLabel} dispatch failed: ${String(err)}`);
+        })
+        .finally(() => {
+          recoveryThinking?.dispose();
         });
     };
 

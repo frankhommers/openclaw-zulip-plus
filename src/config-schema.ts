@@ -66,6 +66,13 @@ const WorkingMessagesSchema = z
   })
   .passthrough();
 
+const ShowThinkingSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    debounceMs: z.number().int().positive().optional(),
+  })
+  .passthrough();
+
 const ZulipActionsSchema = z
   .object({
     "channel-create": z.boolean().optional(),
@@ -118,6 +125,7 @@ const ZulipAccountSchemaBase = z
     personaRouting: z.array(ZulipPersonaRouteSchema).optional(),
     processingSpinner: ProcessingSpinnerSchema.optional(),
     workingMessages: WorkingMessagesSchema.optional(),
+    showThinking: ShowThinkingSchema.optional(),
     textChunkLimit: z.number().int().positive().optional(),
     chunkMode: z.enum(["length", "newline"]).optional(),
     mediaMaxMb: z.number().int().positive().optional(),
