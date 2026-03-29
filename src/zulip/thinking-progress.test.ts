@@ -61,10 +61,8 @@ describe("ThinkingAccumulator", () => {
     expect(call.stream).toBe("test-stream");
     expect(call.topic).toBe("test-topic");
     const content = call.content;
-    expect(content).toContain("```spoiler Thinking");
+    expect(content).toMatch(/```spoiler 🧠 Thinking\.\.\. · updated/);
     expect(content).toContain("Analyzing the problem...");
-    expect(content).toContain("Thinking...");
-    expect(content).toContain("updated");
     expect(content).toMatch(/```$/);
     expect(acc.hasSentMessage).toBe(true);
   });
@@ -103,9 +101,7 @@ describe("ThinkingAccumulator", () => {
 
     expect(mockEdit).toHaveBeenCalledTimes(1);
     const content = mockEdit.mock.calls[0]![0].content;
-    expect(content).toContain("Thinking complete");
-    expect(content).toContain("tokens");
-    expect(content).toContain("5.0s");
+    expect(content).toMatch(/```spoiler 🧠 Thinking complete · ~\d+ tokens · 5\.0s/);
     expect(content).not.toContain("Thinking...");
   });
 
@@ -135,7 +131,7 @@ describe("ThinkingAccumulator", () => {
     await acc.flush();
 
     const content = mockSend.mock.calls[0]![0].content;
-    const spoilerMatch = content.match(/```spoiler Thinking\n([\s\S]*?)\n```$/);
+    const spoilerMatch = content.match(/```spoiler [^\n]+\n([\s\S]*?)\n```$/);
     expect(spoilerMatch).not.toBeNull();
     const inner = spoilerMatch![1]!;
     // Inner content should not contain raw triple backticks
@@ -180,6 +176,34 @@ describe("ThinkingAccumulator", () => {
     expect(ThinkingAccumulator.estimateTokens("a".repeat(4000))).toBe("1.0k");
     expect(ThinkingAccumulator.estimateTokens("a".repeat(8000))).toBe("2.0k");
     expect(ThinkingAccumulator.estimateTokens("")).toBe("0");
+  });
+
+  it("strips SDK reasoning markup from appended text", async () => {
+    mockSend.mockResolvedValueOnce({ result: "success", id: 700 });
+
+    const acc = makeAccumulator();
+    acc.append("Reasoning:\n_Frank is testing the setup_");
+    acc.append("Reasoning:\n_Let me think about this more carefully_");
+    await acc.flush();
+
+    const content = mockSend.mock.calls[0]![0].content;
+    expect(content).not.toContain("Reasoning:");
+    expect(content).not.toMatch(/^_.*_$/m);
+    expect(content).toContain("Frank is testing the setup");
+    expect(content).toContain("Let me think about this more carefully");
+  });
+
+  it("strips multiline reasoning markup", async () => {
+    mockSend.mockResolvedValueOnce({ result: "success", id: 800 });
+
+    const acc = makeAccumulator();
+    acc.append("Reasoning:\n_Line one_\n_Line two_");
+    await acc.flush();
+
+    const content = mockSend.mock.calls[0]![0].content;
+    expect(content).not.toContain("Reasoning:");
+    expect(content).toContain("Line one");
+    expect(content).toContain("Line two");
   });
 
   it("debounces rapid appends into single send", async () => {

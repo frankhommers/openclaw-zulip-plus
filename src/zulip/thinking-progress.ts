@@ -37,8 +37,19 @@ export class ThinkingAccumulator {
     if (!this.buffer) {
       this.startedAt = Date.now();
     }
-    this.buffer += text;
+    this.buffer += ThinkingAccumulator.stripReasoningMarkup(text);
     this.scheduleFlush();
+  }
+
+  /**
+   * Strip the SDK's `Reasoning:\n_italic_` formatting so we store
+   * clean plaintext in the buffer.
+   */
+  private static stripReasoningMarkup(text: string): string {
+    let cleaned = text.replace(/^Reasoning:\n?/gm, "");
+    // Remove italic markers wrapping each line (_text_)
+    cleaned = cleaned.replace(/^_(.*)_$/gm, "$1");
+    return cleaned;
   }
 
   private renderMessage(complete: boolean): string {
@@ -46,12 +57,12 @@ export class ThinkingAccumulator {
     if (complete) {
       const tokens = ThinkingAccumulator.estimateTokens(this.buffer);
       const elapsed = ((Date.now() - this.startedAt) / 1000).toFixed(1);
-      const header = `\u{1F9E0} **Thinking complete** \u00B7 ~${tokens} tokens \u00B7 ${elapsed}s`;
-      return `${header}\n\n\`\`\`spoiler Thinking\n${sanitized}\n\`\`\``;
+      const title = `\u{1F9E0} Thinking complete \u00B7 ~${tokens} tokens \u00B7 ${elapsed}s`;
+      return `\`\`\`spoiler ${title}\n${sanitized}\n\`\`\``;
     }
     const updated = formatClockTime(Date.now());
-    const header = `\u{1F9E0} **Thinking...** \u00B7 updated ${updated}`;
-    return `${header}\n\n\`\`\`spoiler Thinking\n${sanitized}\n\`\`\``;
+    const title = `\u{1F9E0} Thinking... \u00B7 updated ${updated}`;
+    return `\`\`\`spoiler ${title}\n${sanitized}\n\`\`\``;
   }
 
   static estimateTokens(text: string): string {
