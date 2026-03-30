@@ -2826,7 +2826,7 @@ export async function monitorZulipProvider(
           });
 
       const stopSpinner =
-        isDM || !account.processingSpinner.enabled || thinkingProgress
+        isDM || !account.processingSpinner.enabled
           ? async () => {}
           : startProcessingSpinner({
               auth,
@@ -2860,6 +2860,9 @@ export async function monitorZulipProvider(
                 onReasoningStream: thinkingProgress
                   ? (payload: ReplyPayload) => {
                       if (payload.text) {
+                        if (!thinkingProgress.hasContent) {
+                          void stopSpinner();
+                        }
                         thinkingProgress.append(payload.text);
                       }
                     }
