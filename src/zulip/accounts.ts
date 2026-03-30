@@ -86,7 +86,7 @@ export type ResolvedZulipAccount = {
     enabled: boolean;
   };
   showThinking: {
-    enabled: boolean;
+    mode: "none" | "spinner" | "spoiler" | "both";
     debounceMs: number;
   };
   allowBotIds: number[];
@@ -339,8 +339,11 @@ export function resolveZulipAccount(params: {
   const workingMessages = {
     enabled: merged.workingMessages?.enabled !== false,
   };
+  const showThinkingMode = merged.showThinking?.mode ?? "spoiler";
   const showThinking = {
-    enabled: merged.showThinking?.enabled !== false,
+    mode: (["none", "spinner", "spoiler", "both"] as const).includes(showThinkingMode as any)
+      ? (showThinkingMode as "none" | "spinner" | "spoiler" | "both")
+      : ("spoiler" as const),
     debounceMs:
       typeof merged.showThinking?.debounceMs === "number" &&
       Number.isFinite(merged.showThinking.debounceMs)

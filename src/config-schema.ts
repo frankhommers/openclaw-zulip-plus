@@ -68,7 +68,7 @@ const WorkingMessagesSchema = z
 
 const ShowThinkingSchema = z
   .object({
-    enabled: z.boolean().optional(),
+    mode: z.enum(["none", "spinner", "spoiler", "both"]).optional(),
     debounceMs: z.number().int().positive().optional(),
   })
   .passthrough();

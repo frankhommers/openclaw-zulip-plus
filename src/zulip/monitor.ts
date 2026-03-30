@@ -2703,8 +2703,11 @@ export async function monitorZulipProvider(
             log: (m) => logger.debug?.(m),
           })
         : null;
+      const thinkingMode = account.showThinking.mode;
+      const spoilerEnabled = thinkingMode === "spoiler" || thinkingMode === "both";
+      const spinnerEnabled = thinkingMode === "spinner" || thinkingMode === "both";
       const thinkingProgress =
-        !isDM && account.showThinking.enabled
+        !isDM && spoilerEnabled
           ? new ThinkingAccumulator({
               auth,
               stream,
@@ -2826,7 +2829,7 @@ export async function monitorZulipProvider(
           });
 
       const stopSpinner =
-        isDM || !account.processingSpinner.enabled
+        isDM || !account.processingSpinner.enabled || !spinnerEnabled
           ? async () => {}
           : startProcessingSpinner({
               auth,
@@ -2860,9 +2863,6 @@ export async function monitorZulipProvider(
                 onReasoningStream: thinkingProgress
                   ? (payload: ReplyPayload) => {
                       if (payload.text) {
-                        if (!thinkingProgress.hasContent) {
-                          void stopSpinner();
-                        }
                         thinkingProgress.append(payload.text);
                       }
                     }
@@ -3169,7 +3169,8 @@ export async function monitorZulipProvider(
         CommandAuthorized: true,
       });
 
-      const recoveryThinking = account.showThinking.enabled
+      const recoverySpoiler = account.showThinking.mode === "spoiler" || account.showThinking.mode === "both";
+      const recoveryThinking = recoverySpoiler
         ? new ThinkingAccumulator({
             auth,
             stream: params.stream,

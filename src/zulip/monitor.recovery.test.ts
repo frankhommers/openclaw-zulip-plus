@@ -296,7 +296,7 @@ function createHarness(params?: {
     },
     chatmode: "all",
     blockStreaming: true,
-    showThinking: { enabled: false, debounceMs: 1500 },
+    showThinking: { mode: "none", debounceMs: 1500 },
     defaultTopic: "general",
     alwaysReply: true,
     textChunkLimit: 10_000,

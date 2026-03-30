@@ -141,9 +141,16 @@ export type ZulipAccountConfig = {
     enabled?: boolean;
   };
 
-  /** Show model thinking/reasoning in a collapsed spoiler block. Default: enabled. */
+  /**
+   * Processing indicator mode when the model is thinking.
+   * - "none": no indicator
+   * - "spinner": animated emoji reaction on the message
+   * - "spoiler": collapsed spoiler block with live reasoning content
+   * - "both": spinner + spoiler simultaneously
+   * Default: "spoiler".
+   */
   showThinking?: {
-    enabled?: boolean;
+    mode?: "none" | "spinner" | "spoiler" | "both";
     /** Minimum ms between edits to the thinking message. Default: 1500. */
     debounceMs?: number;
   };
